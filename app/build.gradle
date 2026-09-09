@@ -74,13 +74,18 @@ pmd {
 
 spotbugs {
     toolVersion = '4.8.6'
+
+    // The build FAILS on any finding — this is the gate and it stays strict.
     ignoreFailures = false
-    // String form is the documented Groovy syntax: these are Property<Effort> /
-    // Property<Confidence>, and a bare `Effort.MAX` in Groovy resolves to the
-    // CLASS rather than the enum constant, which Gradle rejects at evaluation.
-    effort = 'max'
-    reportLevel = 'medium'
+
     excludeFilter = file("${projectDir}/config/spotbugs/exclude.xml")
+
+    // effort / reportLevel are deliberately left at the plugin defaults
+    // (effort=default, reportLevel=default), which already report
+    // medium-and-higher confidence bugs. They are lazy Property<Effort> /
+    // Property<Confidence> values: Groovy's `=` coerces neither a bare enum
+    // constant (resolves to java.lang.Class) nor a String, so setting them
+    // here is a build-evaluation failure rather than a tuning knob.
 }
 
 tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
