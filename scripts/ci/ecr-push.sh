@@ -13,6 +13,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 require_cmd docker
 require_cmd aws
 require_cmd terraform
+# The projected SA/IRSA tokens live under /var/run/secrets and are the only
+# credential source here — check them before terraform and ECR need them.
+require_pod_credentials
 # This stage rebuilds the image, so it races the dind sidecar exactly like
 # docker_build does — wait for the daemon before any docker command.
 wait_for_docker

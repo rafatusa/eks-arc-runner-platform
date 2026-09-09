@@ -68,11 +68,16 @@ retry() {
 # seconds to initialise storage and bind its unix socket, so a stage that runs
 # `docker build` immediately dies with:
 #
-#   Cannot connect to the Docker daemon at unix:///var/run/docker.sock.
+#   Cannot connect to the Docker daemon at unix:///var/run/docker/docker.sock.
 #
 # The socket's mere existence is not enough (dockerd binds before it is ready to
 # serve), so readiness is probed with `docker info`, which round-trips to the
 # daemon. Same failure class as the cert-manager webhook wait.
+#
+# The socket lives in the DEDICATED /var/run/docker directory, not bare
+# /var/run: the kubelet projects the pod's ServiceAccount and IRSA identity
+# files under /var/run/secrets, and a volume mounted at /var/run shadows them,
+# leaving aws/kubectl unauthenticated. See k8s/ci-job/job-template.yaml.
 #
 # Call this in every stage that talks to docker, AFTER `require_cmd docker`.
 wait_for_docker() {
@@ -80,7 +85,7 @@ wait_for_docker() {
   local delay="${2:-2}"
   local i=1
 
-  : "${DOCKER_HOST:=unix:///var/run/docker.sock}"
+  : "${DOCKER_HOST:=unix:///var/run/docker/docker.sock}"
   export DOCKER_HOST
 
   log "Waiting for the Docker daemon at ${DOCKER_HOST}"
@@ -99,4 +104,21 @@ wait_for_docker() {
 
   info "Docker daemon is ready"
   docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+}
+
+# Verifies the pod's kubelet-projected identity files survived the volume
+# mounts before a stage tries to use them. A volume mounted over /var/run
+# silently erases the projected identity directory, which surfaces much later as
+# an opaque AWS credential error — this turns it into a named failure at the
+# point of cause.
+require_pod_credentials() {
+  local sa_identity="/var/run/secrets/kubernetes.io/serviceaccount"
+  [ -r "${sa_identity}/ca.crt" ] \
+    || fail "ServiceAccount identity missing at ${sa_identity} — a volume is shadowing /var/run/secrets"
+
+  local irsa_identity="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+  if [ -n "${irsa_identity}" ] && [ ! -r "${irsa_identity}" ]; then
+    fail "IRSA identity file missing at ${irsa_identity} — a volume is shadowing /var/run/secrets"
+  fi
+  info "pod identity present (ServiceAccount${irsa_identity:+ + IRSA})"
 }

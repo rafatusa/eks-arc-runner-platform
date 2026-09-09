@@ -63,13 +63,14 @@ spec:
               value: "github.com"
             - name: GITHUB_SERVER
               value: "https://github.com"
-            # The dind sidecar publishes its socket into the shared /var/run
-            # volume. The runner image does NOT set DOCKER_HOST (ARC injects it
-            # only on RunnerDeployment pods, which these dispatched Jobs are
-            # not), so it is set explicitly here rather than relying on the
-            # docker client's implicit default.
+            # The dind sidecar publishes its socket into a DEDICATED shared
+            # directory, never bare /var/run. The kubelet projects the
+            # ServiceAccount token and the IRSA web-identity token under
+            # /var/run/secrets, so mounting a volume at /var/run shadows both and
+            # leaves aws/kubectl with no credentials in this container.
+            # (/var/run is a symlink to /run on this image — same directory.)
             - name: DOCKER_HOST
-              value: "unix:///var/run/docker.sock"
+              value: "unix:///var/run/docker/docker.sock"
             - name: AWS_REGION
               value: "__AWS_REGION__"
             - name: AWS_DEFAULT_REGION
@@ -101,7 +102,7 @@ spec:
               memory: "3Gi"
           volumeMounts:
             - name: docker-socket
-              mountPath: /var/run
+              mountPath: /var/run/docker
             - name: workspace
               mountPath: /home/runner/work
         # Docker-in-Docker sidecar: the build stages build images in-cluster.
@@ -111,6 +112,12 @@ spec:
           image: docker:27-dind
           securityContext:
             privileged: true
+          # dockerd defaults to /var/run/docker.sock; it is pointed at the shared
+          # subdirectory so the socket lands where DOCKER_HOST expects it without
+          # either container mounting over /var/run itself.
+          command: ["dockerd"]
+          args:
+            - "--host=unix:///var/run/docker/docker.sock"
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
@@ -122,7 +129,7 @@ spec:
               memory: "2Gi"
           volumeMounts:
             - name: docker-socket
-              mountPath: /var/run
+              mountPath: /var/run/docker
             - name: docker-storage
               mountPath: /var/lib/docker
       volumes:
