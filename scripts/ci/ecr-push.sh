@@ -4,7 +4,7 @@
 #
 # Each stage is a separate job on a NEW ephemeral runner pod, so the image built
 # in the previous stage is not on this pod's docker daemon. The image is rebuilt
-# here from the same commit (BuildKit layer reuse does not span pods) and pushed.
+# here from the same commit (layer cache does not span pods) and pushed.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
@@ -38,7 +38,11 @@ aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
 log "Building and pushing ${IMAGE_REF}"
-DOCKER_BUILDKIT=1 docker build \
+# DOCKER_BUILDKIT=0 — same reason as docker-build.sh: the runner image has the
+# docker CLI but not the buildx plugin, so the BuildKit default fails. This is
+# the SECOND call site of the same build; both must agree or this stage fails
+# one step after docker_build goes green.
+DOCKER_BUILDKIT=0 docker build \
   -t "${IMAGE_REF}" \
   -t "${ECR_URL}:latest" \
   "${REPO_ROOT}/app"

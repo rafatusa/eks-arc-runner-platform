@@ -105,8 +105,15 @@ spec:
           value: "__AWS_REGION__"
         - name: AWS_DEFAULT_REGION
           value: "__AWS_REGION__"
+        # BuildKit is DISABLED on the runner pods on purpose. The toolchain
+        # image ships the docker CLI but NOT the buildx plugin, and BuildKit is
+        # implemented by buildx — with it enabled every `docker build` fails
+        # with "BuildKit is enabled but the buildx component is missing or
+        # broken". The legacy builder lives inside dockerd and needs no plugin.
+        # app/Dockerfile is written to build identically under either builder.
+        # Flip back to "1" only if buildx is added to runner-image/.
         - name: DOCKER_BUILDKIT
-          value: "1"
+          value: "0"
 
       # Terminating a pod mid-job would fail the workflow; give jobs time to end.
       terminationGracePeriodSeconds: 300

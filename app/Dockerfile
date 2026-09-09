@@ -1,4 +1,9 @@
-# syntax=docker/dockerfile:1
+# NOTE: no `# syntax=docker/dockerfile:1` directive here on purpose.
+# The frontend directive is a BuildKit-only feature and the legacy builder
+# rejects it. The CI runner image ships the docker CLI without the buildx
+# plugin, so the build stages run with DOCKER_BUILDKIT=0. Nothing below uses
+# BuildKit-only syntax (no --mount, no heredocs, no --link), so this file
+# builds identically under either builder.
 
 ##############################################################################
 # Build stage — compiles the Spring Boot fat jar with the pinned JDK.
