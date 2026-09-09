@@ -98,6 +98,12 @@ helm repo add actions-runner-controller \
   https://actions-runner-controller.github.io/actions-runner-controller >/dev/null
 helm repo update >/dev/null
 
+# NOTE: metrics.serviceMonitor is a TABLE in this chart
+# ({enable, interval, namespace, timeout}). Setting the parent key to a scalar
+# replaces the whole map and the chart's template then fails to render with
+# "can't evaluate field enable in type interface {}". Always set the LEAF key.
+# The ServiceMonitor stays disabled because there is no Prometheus Operator
+# (and therefore no ServiceMonitor CRD) in this cluster.
 helm upgrade --install actions-runner-controller \
   actions-runner-controller/actions-runner-controller \
   --namespace "${ARC_NAMESPACE}" \
@@ -106,7 +112,7 @@ helm upgrade --install actions-runner-controller \
   --set authSecret.name=controller-manager \
   --set replicaCount=1 \
   --set "githubWebhookServer.enabled=false" \
-  --set metrics.serviceMonitor=false \
+  --set "metrics.serviceMonitor.enable=false" \
   --wait --timeout 10m
 
 kubectl -n "${ARC_NAMESPACE}" rollout status \
