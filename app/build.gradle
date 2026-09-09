@@ -75,8 +75,11 @@ pmd {
 spotbugs {
     toolVersion = '4.8.6'
     ignoreFailures = false
-    effort = com.github.spotbugs.snom.Effort.MAX
-    reportLevel = com.github.spotbugs.snom.Confidence.MEDIUM
+    // String form is the documented Groovy syntax: these are Property<Effort> /
+    // Property<Confidence>, and a bare `Effort.MAX` in Groovy resolves to the
+    // CLASS rather than the enum constant, which Gradle rejects at evaluation.
+    effort = 'max'
+    reportLevel = 'medium'
     excludeFilter = file("${projectDir}/config/spotbugs/exclude.xml")
 }
 
