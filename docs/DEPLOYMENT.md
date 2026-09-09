@@ -13,7 +13,7 @@ secret must be created by hand.
 | AWS account | With EKS/VPC/IAM/ECR permissions. Verified: account `241533126054`, region `us-east-1`. |
 | VPC headroom | This stack creates its **own** VPC. The default AWS limit is 5 per region — confirm you have one free (`aws ec2 describe-vpcs --query 'length(Vpcs)'`). |
 | Elastic IP headroom | One EIP is consumed by the NAT Gateway. |
-| GitHub PAT | A classic PAT with the **`repo`** scope. ARC uses it to register runners. |
+| GitHub PAT | A classic PAT with the **`repo`** scope. ARC uses it to register runners, and the dispatch shims use it to clone in-cluster. |
 | Local tooling (optional) | `kubectl`, `helm`, `awscli` — only for manual inspection. |
 
 ### Creating the runner PAT
@@ -67,9 +67,14 @@ Expect **40–60 minutes** for a first deploy.
 ### Runner image versioning
 
 The toolchain image is tagged with a **hash of `runner-image/`**
-(`runner-<hash>`), not just `runner-latest`. Changing the Dockerfile produces a
-new tag, so the rebuild actually happens and the pool rolls onto it. An
-unchanged toolchain yields the same tag and the ~1.5 GB build is skipped.
+(`runner-<hash>`), and additionally pushed as `runner-latest`. Changing the
+Dockerfile produces a new tag, so the rebuild actually happens and the pool
+rolls onto it. An unchanged toolchain yields the same tag and the ~1.5 GB build
+is skipped.
+
+> `scripts/ci/dispatch.sh` pins in-cluster CI jobs to **`runner-latest`**, which
+> is re-pushed alongside every content-hash tag. The two therefore stay in sync
+> as long as image changes go through a deploy.
 
 ---
 
@@ -107,30 +112,64 @@ A healthy idle state is **one** runner in phase `Running` (the configured minimu
 
 ---
 
-## Phase 2 — native self-hosted execution (CURRENT MODE)
+## CI execution mode (CURRENT: dispatch shims)
 
-The build and validation pipelines run **natively on the ARC runner pods** via
+`ci-build` and `ci-validate` are generated from the `pipelines:` block of
+`.udap/pipeline.yaml` and run as **dispatch shims**. They work today with no
+manual step.
+
+### How a shim stage executes
+
+1. A GitHub-hosted job (`ubuntu-latest`) starts and installs only what
+   `dispatch.sh` itself needs — terraform and kubectl (`aws` and `python3` are
+   preinstalled on the hosted image).
+2. `scripts/ci/dispatch.sh <stage-id> <script> <deadline>` reads the terraform
+   outputs, ensures the `ci-dispatch` namespace, service account (mirroring the
+   runner IRSA role) and RBAC binding exist, then submits a Kubernetes Job from
+   `k8s/ci-job/job-template.yaml`.
+3. The in-cluster pod runs the **same runner toolchain image** as the ARC
+   runners, clones the exact commit, and executes the real stage script. A
+   Docker-in-Docker sidecar backs the image-building stages.
+4. `dispatch.sh` streams the pod's logs back into the GitHub job and exits with
+   the **in-cluster exit code**, so a failure in the cluster fails the workflow.
+
+The real work (Gradle, Checkstyle/PMD/SpotBugs, JUnit/JaCoCo, Docker, Helm, k6)
+therefore runs **inside Kubernetes on the runner image**. The GitHub job is
+honestly a controller, not an ARC runner — it does not carry
 `runs-on: [self-hosted, eks]`.
 
-### Why the workflow files are committed by hand
+### Why not native, by default
 
-The UDAP pipeline spec has no runner-placement key — the renderer always emits
-`runs-on: ubuntu-latest` — and files under `.github/workflows/` cannot be
-authored through the platform. `ci-build` and `ci-validate` have therefore been
-**removed from the `pipelines:` block** of `.udap/pipeline.yaml` (otherwise the
-next render would overwrite them with `ubuntu-latest` shims), and the workflows
-are committed directly from `docs/self-hosted-workflows/`.
+The UDAP pipeline spec has **no runner-placement key**: the renderer always
+emits `runs-on: ubuntu-latest`, and files under `.github/workflows/` cannot be
+authored through the platform. So a spec-generated workflow can never target the
+pool directly. Dispatch is the mode that works without human intervention.
 
-`.udap/pipeline.yaml` still owns `deploy.yml` and `destroy.yml`, which must stay
-on GitHub-hosted runners because they create the cluster the runners live in.
+---
 
-### Activating (one commit)
+## Optional — switch to native self-hosted execution
+
+`docs/self-hosted-workflows/ci-build.yml` and `ci-validate.yml` are true
+`runs-on: [self-hosted, eks]` workflows: every job runs *as* an ephemeral runner
+pod, with no hosted controller in the middle.
+
+Switching requires a hand commit, because the platform refuses writes under
+`.github/workflows/`.
+
+> **Order matters.** Remove the pipelines from the spec *first*. If both exist,
+> the next `write_pipeline` re-renders an `ubuntu-latest` shim **over** your
+> native file — the two mechanisms cannot own the same filename.
 
 ```bash
-# 1. Confirm the pool is live
-kubectl -n actions-runner-system get runners     # >= 1 in phase Running
+# 1. Confirm the pool is live and carries the toolchain
+kubectl -n actions-runner-system get runners      # >= 1 in phase Running
 
-# 2. Put the native workflows in place
+# 2. Remove `ci-build` and `ci-validate` from the `pipelines:` block of
+#    .udap/pipeline.yaml, ship that change, and let the deploy re-render.
+#    .github/workflows/ must then contain only deploy.yml + destroy.yml.
+
+# 3. Put the native workflows in place
+git pull
 cp docs/self-hosted-workflows/ci-build.yml    .github/workflows/ci-build.yml
 cp docs/self-hosted-workflows/ci-validate.yml .github/workflows/ci-validate.yml
 
@@ -139,16 +178,15 @@ git commit -m "ci: run build and validation natively on EKS self-hosted runners"
 git push
 ```
 
-Then trigger **CI Build (self-hosted)** from the Actions tab. Each job queues
-until a runner pod picks it up; watch the pool scale out with:
+Then trigger **CI Build (self-hosted)** from the Actions tab and watch jobs land:
 
 ```bash
-kubectl -n actions-runner-system get runners -w
+kubectl -n actions-runner-system get pods -w
 ```
 
-### The runner execution contract
+### The native runner execution contract
 
-Two things differ from a GitHub-hosted job, and the workflows depend on both:
+Two things differ from a GitHub-hosted job, and the native workflows depend on both:
 
 - **Toolchain comes from the image, not from `setup-*` actions.**
   `runner-image/Dockerfile` bakes in JDK 21, kubectl, helm, **terraform**, k6 and
@@ -162,28 +200,26 @@ Two things differ from a GitHub-hosted job, and the workflows depend on both:
   bucket needs the `AWS_*` secrets, which take precedence over IRSA in the
   credential chain. Removing them breaks every stage at `terraform init`.
 
-### Job boundaries
+### Job boundaries (both modes)
 
-Every job is a **separate ephemeral pod**. Nothing survives between jobs — not
-the Docker daemon, not `reports/`, not a kubeconfig:
+Every job — hosted or native — is a **separate ephemeral environment**. Nothing
+survives between jobs: not the Docker daemon, not `reports/`, not a kubeconfig.
 
 - `ecr_push` **rebuilds** the image rather than expecting `docker_build`'s layer
   cache; the header of `scripts/ci/ecr-push.sh` documents this.
 - Validation stages resolve the app URL from the cluster every time
   (`scripts/ci/lib/resolve-url.sh`) instead of threading it through job outputs,
   which GitHub drops when the value derives from a secret.
-
-### Reverting to dispatch mode
-
-The dispatch mechanism (`scripts/ci/dispatch.sh`, `k8s/ci-job/`) is retained and
-still works. To go back, delete the two workflow files and re-add the `ci-build`
-/ `ci-validate` pipelines to `.udap/pipeline.yaml`.
+- **Report collection differs.** In dispatch mode `generate-report.sh` publishes
+  the report into a ConfigMap and `fetch-report.sh` pulls it back to the hosted
+  job for artifact upload. In native mode there is no hosted job to pull it back,
+  so the generator re-runs the checks it needs on its own pod.
 
 ---
 
 ## Running the pipelines
 
-Both are `workflow_dispatch` (and `ci-build` also runs on push to `main`).
+Both are `workflow_dispatch`.
 
 ### `ci-build`
 
@@ -197,9 +233,13 @@ The k6 stage **fails the pipeline** if error rate ≥ 1% or p95 latency ≥ 800 
 The final stage publishes `validation-report` as a workflow artifact — open
 `index.html` for the rendered report.
 
-Watch execution land on the pool:
+Watch execution land in the cluster:
 
 ```bash
+# dispatch mode
+kubectl -n ci-dispatch get pods -w
+
+# native mode
 kubectl -n actions-runner-system get pods -w
 ```
 
@@ -234,7 +274,18 @@ kubectl -n actions-runner-system describe runners
 Almost always the PAT: expired, missing the `repo` scope, or created against the
 wrong account. Update `RUNNER_GITHUB_PAT` and re-run the deploy.
 
-### A self-hosted job stays queued forever
+### A dispatched stage never produces a pod
+
+```bash
+kubectl -n ci-dispatch get jobs
+kubectl -n ci-dispatch describe job <job-name>
+```
+
+Usually the node group is full (the Cluster Autoscaler needs 2–4 minutes) or the
+`ci-dispatch-secrets` secret is missing because `DISPATCH_GITHUB_TOKEN` was not
+set on the workflow.
+
+### A self-hosted job stays queued forever (native mode)
 
 No runner carries the requested labels. Check the pool exists and that the
 labels in `k8s/arc/runner-deployment.yaml` match the workflow's `runs-on`:
@@ -243,12 +294,12 @@ labels in `k8s/arc/runner-deployment.yaml` match the workflow's `runs-on`:
 kubectl -n actions-runner-system get runners -o wide   # LABELS column
 ```
 
-### A self-hosted job fails with "required command not found"
+### A stage fails with "required command not found"
 
 The runner image lacks that tool. Add it to `runner-image/Dockerfile` and re-run
 the deploy — the content hash changes, so the image rebuilds and the pool rolls.
-Do **not** paper over it with a `setup-*` action in the workflow: that reinstalls
-on every one of up to 20 pods.
+Do **not** paper over it with a `setup-*` action in a native workflow: that
+reinstalls on every one of up to 20 pods.
 
 ### Runner pods are `Pending`
 
