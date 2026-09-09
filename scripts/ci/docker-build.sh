@@ -8,6 +8,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 require_cmd docker
+# The dind sidecar starts in parallel with this container — block until its
+# daemon actually answers before issuing any docker command.
+wait_for_docker
 
 IMAGE_TAG="${GITHUB_SHA:-manual}"
 IMAGE_TAG="${IMAGE_TAG:0:40}"

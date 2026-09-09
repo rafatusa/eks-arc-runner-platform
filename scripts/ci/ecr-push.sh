@@ -13,6 +13,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 require_cmd docker
 require_cmd aws
 require_cmd terraform
+# This stage rebuilds the image, so it races the dind sidecar exactly like
+# docker_build does — wait for the daemon before any docker command.
+wait_for_docker
 
 IMAGE_TAG="${GITHUB_SHA:-manual}"
 IMAGE_TAG="${IMAGE_TAG:0:40}"

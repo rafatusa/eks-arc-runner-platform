@@ -60,3 +60,43 @@ retry() {
   done
   return 0
 }
+
+# Blocks until the Docker-in-Docker sidecar is actually serving its API.
+#
+# The `ci` and `dind` containers of a dispatched CI Job start in PARALLEL —
+# Kubernetes gives no ordering guarantee between them. dockerd needs a few
+# seconds to initialise storage and bind its unix socket, so a stage that runs
+# `docker build` immediately dies with:
+#
+#   Cannot connect to the Docker daemon at unix:///var/run/docker.sock.
+#
+# The socket's mere existence is not enough (dockerd binds before it is ready to
+# serve), so readiness is probed with `docker info`, which round-trips to the
+# daemon. Same failure class as the cert-manager webhook wait.
+#
+# Call this in every stage that talks to docker, AFTER `require_cmd docker`.
+wait_for_docker() {
+  local attempts="${1:-60}"
+  local delay="${2:-2}"
+  local i=1
+
+  : "${DOCKER_HOST:=unix:///var/run/docker.sock}"
+  export DOCKER_HOST
+
+  log "Waiting for the Docker daemon at ${DOCKER_HOST}"
+  while ! docker info >/dev/null 2>&1; do
+    if [ "${i}" -ge "${attempts}" ]; then
+      printf '\n--- last docker error ---\n' >&2
+      docker info >&2 2>&1 || true
+      fail "the Docker daemon did not become ready after $((attempts * delay))s at ${DOCKER_HOST}"
+    fi
+    if [ "${i}" -eq 1 ] || [ $((i % 5)) -eq 0 ]; then
+      info "daemon not ready yet (attempt ${i}/${attempts}); retrying in ${delay}s"
+    fi
+    i=$((i + 1))
+    sleep "${delay}"
+  done
+
+  info "Docker daemon is ready"
+  docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+}

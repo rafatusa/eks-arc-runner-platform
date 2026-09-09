@@ -63,6 +63,13 @@ spec:
               value: "github.com"
             - name: GITHUB_SERVER
               value: "https://github.com"
+            # The dind sidecar publishes its socket into the shared /var/run
+            # volume. The runner image does NOT set DOCKER_HOST (ARC injects it
+            # only on RunnerDeployment pods, which these dispatched Jobs are
+            # not), so it is set explicitly here rather than relying on the
+            # docker client's implicit default.
+            - name: DOCKER_HOST
+              value: "unix:///var/run/docker.sock"
             - name: AWS_REGION
               value: "__AWS_REGION__"
             - name: AWS_DEFAULT_REGION
@@ -98,6 +105,8 @@ spec:
             - name: workspace
               mountPath: /home/runner/work
         # Docker-in-Docker sidecar: the build stages build images in-cluster.
+        # This container starts in PARALLEL with `ci` — there is no ordering
+        # guarantee — so stages call wait_for_docker() before using docker.
         - name: dind
           image: docker:27-dind
           securityContext:
