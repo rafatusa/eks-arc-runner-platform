@@ -14,6 +14,7 @@ ARG JAVA_VERSION=21
 ARG KUBECTL_VERSION=v1.31.3
 ARG HELM_VERSION=v3.16.3
 ARG K6_VERSION=v0.54.0
+ARG TERRAFORM_VERSION=1.9.8
 
 # Temurin JDK 21 from Adoptium's apt repository — Ubuntu 22.04's own archive
 # does not carry a JDK 21 package.
@@ -47,6 +48,24 @@ RUN set -eux; \
     mv /tmp/linux-amd64/helm /usr/local/bin/helm; \
     rm -rf /tmp/helm.tgz /tmp/linux-amd64; \
     helm version --short
+
+# Terraform — REQUIRED for native self-hosted execution (Phase 2).
+#
+# Every stage reads infrastructure values itself via `terraform output` rather
+# than threading them between jobs (the project name is a secret, so derived
+# ECR/ALB identifiers are masked and dropped from job outputs). Under the
+# Phase-1 dispatch shims the GitHub-hosted job supplied terraform via
+# hashicorp/setup-terraform; when the job runs natively ON a runner pod there is
+# no such step, so the binary must be in this image or scripts/lib/common.sh
+# fails at `require_cmd terraform`.
+RUN set -eux; \
+    curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+        -o /tmp/terraform.zip; \
+    unzip -q /tmp/terraform.zip -d /tmp; \
+    mv /tmp/terraform /usr/local/bin/terraform; \
+    chmod +x /usr/local/bin/terraform; \
+    rm -f /tmp/terraform.zip; \
+    terraform version
 
 # k6 — used by the validation pipeline's load stage.
 RUN set -eux; \

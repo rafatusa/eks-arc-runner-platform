@@ -1,11 +1,16 @@
 # PHASE 2 — NATIVE SELF-HOSTED VALIDATION PIPELINE
 #
-# Copy to .github/workflows/ci-validate.yml after the ARC runners are live.
-# See docs/self-hosted-workflows/ci-build.yml for the full rationale.
+# Copy to .github/workflows/ci-validate.yml and commit it. See
+# docs/self-hosted-workflows/ci-build.yml for the full rationale, the runner
+# toolchain contract, and why the AWS_* secrets are required alongside IRSA.
+#
+# The `ci-validate` pipeline has already been REMOVED from .udap/pipeline.yaml,
+# so nothing will re-render over this file.
 #
 # Unlike the dispatch version, these stages share nothing across jobs either —
 # each job is its own ephemeral pod — so every stage resolves the application
-# URL from the cluster itself (scripts/ci/lib/resolve-url.sh).
+# URL from the cluster itself (scripts/ci/lib/resolve-url.sh) rather than
+# receiving it through job outputs, which GitHub drops for secret-derived values.
 name: CI Validate (self-hosted)
 
 on:
@@ -102,6 +107,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      # Each stage above ran on its own pod, so reports/ is empty here. The
+      # generator re-runs the checks it needs and marks anything it could not
+      # collect, rather than silently emitting a partial report.
       - name: Generate the HTML validation report
         run: bash scripts/ci/generate-report.sh
       - name: Upload the HTML report

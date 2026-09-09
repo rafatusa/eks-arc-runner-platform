@@ -32,7 +32,16 @@ AWS_REGION_VALUE="$(tf_output aws_region)"
 ECR_URL="$(tf_output ecr_repository_url)"
 RUNNER_ROLE_ARN="$(tf_output runner_role_arn)"
 ECR_REGISTRY="${ECR_URL%%/*}"
-RUNNER_IMAGE="${ECR_URL}:runner-latest"
+
+# The runner image is tagged with a hash of its OWN build context, so a change
+# to runner-image/Dockerfile produces a new tag and is actually rolled out.
+# Tagging it :runner-latest only and skipping the build when that tag exists
+# would silently pin the pool to the first toolchain ever built — which is how a
+# missing binary (e.g. terraform) survives a redeploy.
+RUNNER_IMAGE_HASH="$(find "${REPO_ROOT}/runner-image" -type f -print0 \
+  | sort -z | xargs -0 cat | sha256sum | cut -c1-12)"
+RUNNER_IMAGE_TAG="runner-${RUNNER_IMAGE_HASH}"
+RUNNER_IMAGE="${ECR_URL}:${RUNNER_IMAGE_TAG}"
 info "repository=${RUNNER_REPOSITORY}"
 info "runner image=${RUNNER_IMAGE}"
 
@@ -61,17 +70,18 @@ log "Building the runner toolchain image"
 aws ecr get-login-password --region "${AWS_REGION_VALUE}" \
   | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
-# Reuse the published image when it already exists: rebuilding a ~1.5GB
-# toolchain on every deploy adds minutes without changing anything.
+# Rebuild only when this exact toolchain has never been published: the image is
+# ~1.5GB and unchanged content yields an identical tag.
 if aws ecr describe-images \
       --repository-name "$(tf_output ecr_repository_name)" \
-      --image-ids imageTag=runner-latest \
+      --image-ids "imageTag=${RUNNER_IMAGE_TAG}" \
       --region "${AWS_REGION_VALUE}" >/dev/null 2>&1; then
-  info "runner image already present in ECR — skipping rebuild"
+  info "runner image ${RUNNER_IMAGE_TAG} already published — skipping rebuild"
 else
   info "building ${RUNNER_IMAGE}"
-  docker build -t "${RUNNER_IMAGE}" "${REPO_ROOT}/runner-image"
+  docker build -t "${RUNNER_IMAGE}" -t "${ECR_URL}:runner-latest" "${REPO_ROOT}/runner-image"
   docker push "${RUNNER_IMAGE}"
+  docker push "${ECR_URL}:runner-latest"
 fi
 
 ##############################################################################
@@ -164,16 +174,22 @@ kubectl apply -f "${RENDER_DIR}/hra.yaml"
 ##############################################################################
 log "Waiting for runners to register with GitHub"
 ##############################################################################
+# A toolchain change rolls the pool: wait for a runner that is BOTH Running and
+# on the image this run published, so a stale pod does not satisfy the check.
 runner_is_ready() {
-  local ready
-  ready="$(kubectl -n "${ARC_NAMESPACE}" get runners \
-    -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
-    | grep -c '^Running$' || true)"
-  [ "${ready}" -ge 1 ]
+  local pod_image ready=0
+  while read -r phase image; do
+    if [ "${phase}" = "Running" ] && [ "${image}" = "${RUNNER_IMAGE}" ]; then
+      ready=1
+    fi
+  done < <(kubectl -n "${ARC_NAMESPACE}" get pods \
+    -l actions-runner-controller/inject-registration-token!=true \
+    -o jsonpath='{range .items[*]}{.status.phase}{" "}{.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)
+  [ "${ready}" -eq 1 ]
 }
 
 retry 40 15 runner_is_ready \
-  || fail "no runner pod reached the Running phase — check 'kubectl -n ${ARC_NAMESPACE} describe runners' and the credential scopes"
+  || fail "no runner pod reached the Running phase on ${RUNNER_IMAGE} — check 'kubectl -n ${ARC_NAMESPACE} describe runners' and the credential scopes"
 
 log "Actions Runner Controller is live"
 kubectl -n "${ARC_NAMESPACE}" get runnerdeployments,horizontalrunnerautoscalers,runners,pods
