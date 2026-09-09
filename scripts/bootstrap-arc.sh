@@ -176,14 +176,21 @@ log "Waiting for runners to register with GitHub"
 ##############################################################################
 # A toolchain change rolls the pool: wait for a runner that is BOTH Running and
 # on the image this run published, so a stale pod does not satisfy the check.
+#
+# SELECTOR: runner pods carry the label `actions-runner` (empty value); the ARC
+# controller pod does not. Do NOT filter on
+# `actions-runner-controller/inject-registration-token!=true` — ARC sets that
+# label to "true" on RUNNER pods (it marks pods needing a registration token),
+# so the negated form selects everything EXCEPT runners and the wait can never
+# succeed. Verified live: that selector returned only the controller pod.
 runner_is_ready() {
-  local pod_image ready=0
+  local ready=0 phase image
   while read -r phase image; do
     if [ "${phase}" = "Running" ] && [ "${image}" = "${RUNNER_IMAGE}" ]; then
       ready=1
     fi
   done < <(kubectl -n "${ARC_NAMESPACE}" get pods \
-    -l actions-runner-controller/inject-registration-token!=true \
+    -l actions-runner \
     -o jsonpath='{range .items[*]}{.status.phase}{" "}{.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)
   [ "${ready}" -eq 1 ]
 }
