@@ -23,7 +23,7 @@
 # (<project>-runner-role) scoped to ECR + eks:DescribeCluster. The stage scripts
 # ALSO read the terraform state bucket, which that role intentionally cannot
 # access, so the AWS_* secrets below are required and take precedence over IRSA.
-# Do not remove them expecting IRSA to cover the gap — terraform init would fail
+# Do not remove them expecting IRSA to cover the gap — terraform init -reconfigure would fail
 # with AccessDenied on the state bucket.
 name: CI Build (self-hosted)
 
