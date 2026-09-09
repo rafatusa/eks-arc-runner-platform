@@ -1,0 +1,10 @@
+.git
+.gitignore
+build/
+.gradle/
+*.log
+*.md
+.idea/
+.vscode/
+**/.DS_Store
+reports/

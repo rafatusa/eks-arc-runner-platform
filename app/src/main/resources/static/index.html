@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitHub Self-Hosted Runner Platform</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      padding: 2rem;
+    }
+    .card {
+      max-width: 46rem;
+      width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 14px;
+      padding: 2.5rem;
+    }
+    h1 {
+      margin: 0 0 .35rem;
+      font-size: 1.7rem;
+      letter-spacing: -.02em;
+    }
+    p.sub {
+      margin: 0 0 1.75rem;
+      color: #8b949e;
+      line-height: 1.55;
+    }
+    .pill {
+      display: inline-block;
+      padding: .2rem .65rem;
+      border-radius: 999px;
+      background: #1f6feb22;
+      border: 1px solid #1f6feb55;
+      color: #79c0ff;
+      font-size: .78rem;
+      margin-bottom: 1.25rem;
+    }
+    ul.links {
+      list-style: none;
+      padding: 0;
+      margin: 0 0 1.75rem;
+    }
+    ul.links li { margin-bottom: .6rem; }
+    a.endpoint {
+      display: inline-block;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      color: #79c0ff;
+      text-decoration: none;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: .45rem .8rem;
+      background: #0d1117;
+    }
+    a.endpoint:hover { border-color: #1f6feb; }
+    dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: .45rem 1.25rem;
+      margin: 0;
+      font-size: .9rem;
+    }
+    dt { color: #8b949e; }
+    dd {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    footer {
+      margin-top: 2rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid #30363d;
+      color: #6e7681;
+      font-size: .82rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <span class="pill">Amazon EKS &middot; Actions Runner Controller</span>
+    <h1>GitHub Self-Hosted Runner Platform</h1>
+    <p class="sub">
+      This service was built, tested and deployed by ephemeral GitHub Actions
+      runner pods running inside the very cluster it is deployed to. Runners are
+      created on demand from queued jobs, execute exactly one job each, and are
+      destroyed afterwards.
+    </p>
+
+    <ul class="links">
+      <li><a class="endpoint" href="/hello">GET /hello</a></li>
+      <li><a class="endpoint" href="/health">GET /health</a></li>
+      <li><a class="endpoint" href="/actuator/health">GET /actuator/health</a></li>
+    </ul>
+
+    <dl>
+      <dt>Version</dt><dd id="version">loading&hellip;</dd>
+      <dt>Served by</dt><dd id="hostname">loading&hellip;</dd>
+    </dl>
+
+    <footer>Built with UDAP &middot; Spring Boot 3.2 on Java 21</footer>
+  </main>
+
+  <script>
+    // Populated from /health so the page shows which pod actually served it.
+    fetch('/health')
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        document.getElementById('version').textContent = data.version || 'unknown';
+        document.getElementById('hostname').textContent = data.hostname || 'unknown';
+      })
+      .catch(function () {
+        document.getElementById('version').textContent = 'unavailable';
+        document.getElementById('hostname').textContent = 'unavailable';
+      });
+  </script>
+</body>
+</html>

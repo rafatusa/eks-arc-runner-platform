@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+  <!--
+    Spring injects and manages these classes; SpotBugs' expectations about
+    externally-mutable objects and unread fields do not apply to beans.
+  -->
+  <Match>
+    <Class name="~.*Application"/>
+  </Match>
+
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- Generated test classes are analysed by the test task, not SpotBugs. -->
+  <Match>
+    <Class name="~.*Test"/>
+  </Match>
+  <Match>
+    <Class name="~.*IT"/>
+  </Match>
+</FindBugsFilter>

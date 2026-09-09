@@ -1,0 +1,36 @@
+# udap:meta cloud=aws region=us-east-1 target=eks
+
+dev: Developer { shape: person; udap-type: generic.user }
+gh: GitHub Actions Workflows { icon: simple:githubactions; udap-type: generic.app }
+ecr: Amazon ECR { udap-type: aws.ecr }
+cw: CloudWatch Logs { udap-type: aws.cloudwatch }
+oidc: IAM OIDC Provider + IRSA Roles { udap-type: aws.iam }
+vpc: VPC 10.20.0.0/16 {
+  igw: Internet Gateway { udap-type: aws.internetgateway }
+  nat: NAT Gateway { udap-type: aws.natgateway }
+  alb: Application Load Balancer { udap-type: aws.alb }
+  eks: EKS Control Plane { udap-type: aws.eks }
+  nodes: Managed Node Group (private) { udap-type: aws.ec2 }
+  arc: Actions Runner Controller { icon: simple:githubactions; udap-type: generic.app }
+  runners: Ephemeral Runner Pods 1-20 { icon: simple:kubernetes; udap-type: generic.app }
+  app: Spring Boot API Pods { icon: simple:springboot; udap-type: generic.app }
+  addons: Metrics Server + LB Controller + Cluster Autoscaler { icon: simple:helm; udap-type: generic.app }
+}
+
+dev -> gh: git push
+gh -> vpc.runners: queue jobs
+vpc.arc -> gh: poll queued jobs (PAT)
+vpc.arc -> vpc.runners: create / delete ephemeral pods
+vpc.runners -> ecr: build and push image
+vpc.runners -> vpc.app: helm upgrade
+ecr -> vpc.app: pull image
+vpc.igw -> vpc.alb: inbound 80
+vpc.alb -> vpc.app: HTTP 8080
+vpc.nodes -> vpc.nat: egress
+vpc.nat -> vpc.igw: egress
+vpc.eks -> vpc.nodes: schedules pods
+vpc.addons -> vpc.alb: provisions ALB
+vpc.addons -> vpc.nodes: scales node group
+oidc -> vpc.addons: IRSA credentials
+vpc.app -> cw: logs
+vpc.runners -> cw: logs

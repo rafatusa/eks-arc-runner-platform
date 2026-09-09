@@ -1,0 +1,2 @@
+# The gradle-wrapper.jar is bootstrapped by ./gradlew on first use.
+# See app/gradlew — it downloads the JAR matching gradle-wrapper.properties.

@@ -1,0 +1,198 @@
+#!/bin/sh
+
+#
+# Copyright © 2015 the original authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+##############################################################################
+#
+#   Gradle start up script for POSIX.
+#
+#   This copy self-bootstraps the wrapper JAR: binary files cannot be stored in
+#   the generated repository, so the JAR that matches the version pinned in
+#   gradle/wrapper/gradle-wrapper.properties is fetched on first use and cached
+#   in place. Every later invocation is the stock Gradle wrapper behaviour.
+#
+##############################################################################
+
+# Attempt to set APP_HOME
+
+# Resolve links: $0 may be a link
+app_path=$0
+
+# Need this for daisy-chained symlinks.
+while
+    APP_HOME=${app_path%"${app_path##*/}"}  # leaves a trailing /; empty if no leading path
+    [ -h "$app_path" ]
+do
+    ls=$( ls -ld "$app_path" )
+    link=${ls#*' -> '}
+    case $link in             #(
+      /*)   app_path=$link ;; #(
+      *)    app_path=$APP_HOME$link ;;
+    esac
+done
+
+APP_BASE_NAME=${0##*/}
+APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s\n' "$PWD" ) || exit
+
+MAX_FD=maximum
+
+warn () {
+    echo "$*"
+} >&2
+
+die () {
+    echo
+    echo "$*"
+    echo
+    exit 1
+} >&2
+
+# OS specific support (must be 'true' or 'false').
+cygwin=false
+msys=false
+darwin=false
+nonstop=false
+case "$( uname )" in                #(
+  CYGWIN* )         cygwin=true  ;; #(
+  Darwin* )         darwin=true  ;; #(
+  MSYS* | MINGW* )  msys=true    ;; #(
+  NONSTOP* )        nonstop=true ;;
+esac
+
+# Determine the Java command to use to start the JVM.
+if [ -n "$JAVA_HOME" ] ; then
+    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+        JAVACMD=$JAVA_HOME/jre/sh/java
+    else
+        JAVACMD=$JAVA_HOME/bin/java
+    fi
+    if [ ! -x "$JAVACMD" ] ; then
+        die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+else
+    JAVACMD=java
+    if ! command -v java >/dev/null 2>&1
+    then
+        die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+
+Please set the JAVA_HOME variable in your environment to match the
+location of your Java installation."
+    fi
+fi
+
+##############################################################################
+# Bootstrap the wrapper JAR when it is not present in the checkout.
+##############################################################################
+WRAPPER_DIR=$APP_HOME/gradle/wrapper
+WRAPPER_JAR=$WRAPPER_DIR/gradle-wrapper.jar
+WRAPPER_PROPERTIES=$WRAPPER_DIR/gradle-wrapper.properties
+
+if [ ! -f "$WRAPPER_JAR" ] ; then
+    if [ ! -f "$WRAPPER_PROPERTIES" ] ; then
+        die "ERROR: $WRAPPER_PROPERTIES is missing; cannot determine the Gradle version to bootstrap."
+    fi
+
+    # distributionUrl looks like: https\://services.gradle.org/distributions/gradle-8.10.2-bin.zip
+    GRADLE_VERSION=$(
+        sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip$/\1/p' "$WRAPPER_PROPERTIES"
+    )
+    if [ -z "$GRADLE_VERSION" ] ; then
+        die "ERROR: could not parse the Gradle version from $WRAPPER_PROPERTIES"
+    fi
+
+    WRAPPER_JAR_URL="https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar"
+    echo "Bootstrapping Gradle wrapper ${GRADLE_VERSION} from ${WRAPPER_JAR_URL}" >&2
+    mkdir -p "$WRAPPER_DIR" || die "ERROR: cannot create $WRAPPER_DIR"
+
+    if command -v curl >/dev/null 2>&1 ; then
+        curl --fail --location --silent --show-error --retry 5 --retry-delay 3 \
+            --output "$WRAPPER_JAR.tmp" "$WRAPPER_JAR_URL" \
+            || die "ERROR: failed to download the Gradle wrapper JAR from $WRAPPER_JAR_URL"
+    elif command -v wget >/dev/null 2>&1 ; then
+        wget --quiet --tries=5 --output-document="$WRAPPER_JAR.tmp" "$WRAPPER_JAR_URL" \
+            || die "ERROR: failed to download the Gradle wrapper JAR from $WRAPPER_JAR_URL"
+    else
+        die "ERROR: neither curl nor wget is available to bootstrap the Gradle wrapper JAR."
+    fi
+
+    mv "$WRAPPER_JAR.tmp" "$WRAPPER_JAR" || die "ERROR: could not install $WRAPPER_JAR"
+fi
+
+# Increase the maximum file descriptors if we can.
+if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
+    case $MAX_FD in #(
+      max*)
+        # shellcheck disable=SC2039,SC3045
+        MAX_FD=$( ulimit -H -n ) ||
+            warn "Could not query maximum file descriptor limit"
+    esac
+    case $MAX_FD in  #(
+      '' | soft) :;; #(
+      *)
+        # shellcheck disable=SC2039,SC3045
+        ulimit -n "$MAX_FD" ||
+            warn "Could not set maximum file descriptor limit to $MAX_FD"
+    esac
+fi
+
+# For Cygwin or MSYS, switch paths to Windows format before running java
+if "$cygwin" || "$msys" ; then
+    APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
+    JAVACMD=$( cygpath --unix "$JAVACMD" )
+
+    for arg do
+        if
+            case $arg in                                #(
+              -*)   false ;;                            #(
+              /?*)  t=${arg#/} t=/${t%%/*}
+                    [ -e "$t" ] ;;                      #(
+              *)    false ;;
+            esac
+        then
+            arg=$( cygpath --path --ignore --mixed "$arg" )
+        fi
+        shift
+        set -- "$@" "$arg"
+    done
+fi
+
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+
+set -- \
+        "-Dorg.gradle.appname=$APP_BASE_NAME" \
+        -classpath "$WRAPPER_JAR" \
+        org.gradle.wrapper.GradleWrapperMain \
+        "$@"
+
+if ! command -v xargs >/dev/null 2>&1
+then
+    die "xargs is not available"
+fi
+
+eval "set -- $(
+        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
+        xargs -n1 |
+        sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
+        tr '\n' ' '
+    )" '"$@"'
+
+exec "$JAVACMD" "$@"

@@ -1,0 +1,96 @@
+# CI/CD pipeline diagram — render with:  d2 docs/pipeline.d2 docs/pipeline.svg
+#
+# Full D2 (not the UDAP architecture profile) — this file documents the pipeline
+# topology; .udap/architecture.d2 documents the infrastructure.
+
+direction: down
+
+classes: {
+  hosted: {
+    style: { fill: "#1f2937"; stroke: "#6b7280"; font-color: "#e5e7eb" }
+  }
+  cluster: {
+    style: { fill: "#0b3d2e"; stroke: "#10b981"; font-color: "#d1fae5" }
+  }
+  gate: {
+    style: { fill: "#3b2f0b"; stroke: "#f59e0b"; font-color: "#fef3c7" }
+  }
+}
+
+deploy: "Deploy workflow — GitHub-hosted" {
+  class: hosted
+  explanation: |md
+    Runs on `ubuntu-latest` **by design**:
+    it creates the cluster and the runners,
+    so it cannot depend on them.
+  |
+
+  d1: lint (Checkstyle + PMD + SpotBugs)
+  d2: test (JUnit + JaCoCo)
+  d3: build (bootJar)
+  d4: provision (terraform apply) { class: gate }
+  d5: configure (Helm bootstrap + ARC + app) { class: gate }
+  d6: verify (platform health) { class: gate }
+
+  d1 -> d2 -> d3 -> d4 -> d5 -> d6
+}
+
+bootstrap: "What configure installs" {
+  class: cluster
+  b1: Metrics Server
+  b2: AWS Load Balancer Controller
+  b3: Cluster Autoscaler
+  b4: cert-manager
+  b5: Actions Runner Controller
+  b6: RunnerDeployment (ephemeral) + HorizontalRunnerAutoscaler (1-20)
+  b7: Spring Boot app (Helm, behind the ALB)
+
+  b4 -> b5 -> b6
+}
+
+build: "Build pipeline — work executes in the cluster" {
+  class: cluster
+  explanation: |md
+    Each job is a **thin controller**: it submits a
+    Kubernetes Job that runs the stage on the runner
+    toolchain image, streams the logs back, and exits
+    with the in-cluster exit code.
+  |
+
+  c1: Checkout
+  c2: Gradle Build
+  c3: Checkstyle
+  c4: PMD
+  c5: SpotBugs
+  c6: JUnit Tests
+  c7: JaCoCo Coverage
+  c8: Build Docker Image
+  c9: Push Image to Amazon ECR
+  c10: Helm Upgrade
+  c11: Verify Rollout
+
+  c1 -> c2 -> c3 -> c4 -> c5 -> c6 -> c7 -> c8 -> c9 -> c10 -> c11
+}
+
+validate: "Validation pipeline — against the live deployment" {
+  class: cluster
+
+  v1: Smoke Test
+  v2: REST Assured Tests
+  v3: k6 Load Test
+  v4: Deployment Verification
+  v5: Generate HTML Report
+
+  v1 -> v2 -> v3 -> v4 -> v5
+}
+
+destroy: "Destroy workflow — GitHub-hosted" {
+  class: hosted
+  x1: terraform destroy (same backend + TF_VARs)
+}
+
+deploy.d5 -> bootstrap: installs
+bootstrap.b6 -> build: runners become available
+build.c11 -> validate.v1: on success
+deploy.d6 -> build: platform ready
+validate.v5 -> destroy: teardown when finished

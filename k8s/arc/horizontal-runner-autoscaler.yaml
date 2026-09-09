@@ -1,0 +1,33 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: eks-runners-autoscaler
+  namespace: actions-runner-system
+spec:
+  scaleTargetRef:
+    kind: RunnerDeployment
+    name: eks-runners
+
+  # One idle runner is always warm so a queued job starts immediately;
+  # bursts scale out to 20 concurrent runner pods.
+  minReplicas: 1
+  maxReplicas: 20
+
+  # Scale down deliberately slower than up: a queue that just drained is often
+  # about to refill, and cold-starting a runner costs ~30s of job latency.
+  scaleDownDelaySecondsAfterScaleOut: 300
+
+  metrics:
+    # Primary signal: how many workflow runs are queued or in progress for the
+    # labels this runner deployment serves. One runner is requested per run.
+    - type: TotalNumberOfQueuedAndInProgressWorkflowRuns
+      repositoryNames:
+        - __GITHUB_REPOSITORY_NAME__
+
+  # Safety net: if the webhook/API signal is delayed, keep headroom whenever
+  # the existing pool is busy.
+  scaleUpTriggers:
+    - githubEvent:
+        workflowJob: {}
+      amount: 1
+      duration: "10m"

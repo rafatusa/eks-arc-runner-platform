@@ -1,0 +1,112 @@
+---
+# Service account assumed by runner pods via IRSA so they can push to ECR and
+# talk to the EKS API without any static AWS credentials.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: actions-runner-system
+  annotations:
+    eks.amazonaws.com/role-arn: "__RUNNER_ROLE_ARN__"
+---
+# Runner pods (and the dispatched CI jobs, which reuse this role) drive
+# `helm upgrade`, `kubectl rollout status`, and publish the validation report
+# through a ConfigMap. Scoped to what those tasks need — no cluster-admin.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-deployer
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "serviceaccounts", "events", "namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["actions.summerwind.dev"]
+    resources: ["runnerdeployments", "horizontalrunnerautoscalers", "runners"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: github-runner-deployer
+subjects:
+  - kind: ServiceAccount
+    name: github-runner
+    namespace: actions-runner-system
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: eks-runners
+  namespace: actions-runner-system
+spec:
+  # replicas is deliberately omitted: the HorizontalRunnerAutoscaler owns it.
+  template:
+    spec:
+      repository: __GITHUB_REPOSITORY__
+
+      # EPHEMERAL RUNNERS: each pod accepts exactly one job and is then
+      # destroyed, so no job ever inherits state from a previous one.
+      ephemeral: true
+
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - eks
+
+      serviceAccountName: github-runner
+
+      # Custom toolchain image (JDK 21, Gradle-ready, kubectl, helm, k6, awscli)
+      # built and pushed to ECR by the deploy pipeline.
+      image: __RUNNER_IMAGE__
+      imagePullPolicy: Always
+
+      # Docker-in-Docker sidecar: the build pipeline builds and pushes images.
+      dockerdWithinRunnerContainer: false
+      dockerEnabled: true
+      dockerdContainerResources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          memory: 2Gi
+
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          memory: 3Gi
+
+      env:
+        - name: AWS_REGION
+          value: "__AWS_REGION__"
+        - name: AWS_DEFAULT_REGION
+          value: "__AWS_REGION__"
+        - name: DOCKER_BUILDKIT
+          value: "1"
+
+      # Terminating a pod mid-job would fail the workflow; give jobs time to end.
+      terminationGracePeriodSeconds: 300

@@ -1,0 +1,134 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.11'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'checkstyle'
+    id 'pmd'
+    id 'com.github.spotbugs' version '6.0.26'
+    id 'jacoco'
+}
+
+group = 'com.example'
+version = '1.0.0'
+description = 'GitHub Self-Hosted Runner Platform sample API'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'io.rest-assured:rest-assured:5.5.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    compileOnly 'com.github.spotbugs:spotbugs-annotations:4.8.6'
+}
+
+// Unit tests: everything except the tests that need a deployed environment.
+tasks.named('test', Test) {
+    useJUnitPlatform {
+        excludeTags 'e2e'
+    }
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+    finalizedBy tasks.named('jacocoTestReport')
+}
+
+// REST Assured suite: runs in the validation pipeline against a live base URL.
+tasks.register('restAssuredTest', Test) {
+    description = 'Runs REST Assured tests against a deployed base URL (BASE_URL env var).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'e2e'
+    }
+    systemProperty 'base.url', System.getenv('BASE_URL') ?: 'http://localhost:8080'
+    outputs.upToDateWhen { false }
+}
+
+checkstyle {
+    toolVersion = '10.20.1'
+    configFile = file("${projectDir}/config/checkstyle/checkstyle.xml")
+    maxWarnings = 0
+    ignoreFailures = false
+}
+
+pmd {
+    toolVersion = '7.7.0'
+    consoleOutput = true
+    ignoreFailures = false
+    ruleSetFiles = files("${projectDir}/config/pmd/ruleset.xml")
+    ruleSets = []
+}
+
+spotbugs {
+    toolVersion = '4.8.6'
+    ignoreFailures = false
+    effort = com.github.spotbugs.snom.Effort.MAX
+    reportLevel = com.github.spotbugs.snom.Confidence.MEDIUM
+    excludeFilter = file("${projectDir}/config/spotbugs/exclude.xml")
+}
+
+tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
+    reports {
+        html.required = true
+        xml.required = false
+    }
+}
+
+// Static analysis of test sources adds noise without value for this sample.
+tasks.named('pmdTest') { enabled = false }
+tasks.named('spotbugsTest') { enabled = false }
+
+jacoco {
+    toolVersion = '0.8.12'
+}
+
+// The Spring bootstrap class is framework glue with no branches worth testing;
+// counting it would only dilute the signal from the code that has logic.
+def coverageExclusions = ['com/example/runnerplatform/RunnerPlatformApplication.class']
+
+tasks.named('jacocoTestReport', JacocoReport) {
+    dependsOn tasks.named('test')
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    classDirectories.setFrom(
+        files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: coverageExclusions)
+        })
+    )
+}
+
+tasks.named('jacocoTestCoverageVerification', JacocoCoverageVerification) {
+    dependsOn tasks.named('jacocoTestReport')
+    classDirectories.setFrom(
+        files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: coverageExclusions)
+        })
+    )
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+}
+
+tasks.named('bootJar') {
+    archiveFileName = 'app.jar'
+}
