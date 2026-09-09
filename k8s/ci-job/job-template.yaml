@@ -33,6 +33,7 @@ spec:
               echo "=== dispatched CI stage: ${STAGE_ID} ==="
               echo "pod: ${HOSTNAME}  node: ${NODE_NAME:-unknown}"
               echo "commit: ${COMMIT_SHA}"
+              echo "user: $(id)"
               echo
 
               workdir="$(mktemp -d)"
@@ -115,12 +116,24 @@ spec:
           # dockerd defaults to /var/run/docker.sock; it is pointed at the shared
           # subdirectory so the socket lands where DOCKER_HOST expects it without
           # either container mounting over /var/run itself.
+          #
+          # --group is REQUIRED, not cosmetic. The `ci` container runs as the
+          # non-root uid 1001 (`runner`). Without --group, dockerd creates the
+          # socket root-owned with no group access and every docker command in
+          # `ci` fails INSTANTLY with a permission error — the pod dies in
+          # seconds, long before wait_for_docker's timeout. Handing dockerd the
+          # runner's gid makes the socket srw-rw---- root:runner, which is
+          # exactly how the ARC RunnerDeployment's own dind is wired (verified
+          # live on a runner pod). Keep this in sync with the runner image's uid.
           command: ["dockerd"]
           args:
             - "--host=unix:///var/run/docker/docker.sock"
+            - "--group=$(DOCKER_GROUP_GID)"
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
+            - name: DOCKER_GROUP_GID
+              value: "1001"
           resources:
             requests:
               cpu: "250m"

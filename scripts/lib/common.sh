@@ -76,23 +76,36 @@ retry() {
 #
 # The socket lives in the DEDICATED /var/run/docker directory, not bare
 # /var/run: the kubelet projects the pod's ServiceAccount and IRSA identity
-# files under /var/run/secrets, and a volume mounted at /var/run shadows them,
-# leaving aws/kubectl unauthenticated. See k8s/ci-job/job-template.yaml.
+# files under /var/run/secrets, and a volume mounted at /var/run shadows them
+# unless the projected volumes are re-mounted on top at their more specific
+# paths. See k8s/ci-job/job-template.yaml.
 #
 # Call this in every stage that talks to docker, AFTER `require_cmd docker`.
 wait_for_docker() {
   local attempts="${1:-60}"
   local delay="${2:-2}"
   local i=1
+  local err
 
   : "${DOCKER_HOST:=unix:///var/run/docker/docker.sock}"
   export DOCKER_HOST
 
   log "Waiting for the Docker daemon at ${DOCKER_HOST}"
   while ! docker info >/dev/null 2>&1; do
+    # A PERMISSION error is not a readiness problem and will never clear by
+    # waiting: it means dockerd created the socket without granting the
+    # runner's group access (dind needs --group=<runner gid>). Fail fast with
+    # the cause named rather than burning the full timeout on it.
+    err="$(docker info 2>&1 || true)"
+    case "${err}" in
+      *"permission denied"*|*"Permission denied"*)
+        printf '\n--- docker error ---\n%s\n' "${err}" >&2
+        fail "cannot access ${DOCKER_HOST}: permission denied for $(id -un) (uid $(id -u), groups $(id -Gn)). The dind sidecar must run dockerd with --group=<runner gid> so the socket is group-accessible."
+        ;;
+    esac
+
     if [ "${i}" -ge "${attempts}" ]; then
-      printf '\n--- last docker error ---\n' >&2
-      docker info >&2 2>&1 || true
+      printf '\n--- last docker error ---\n%s\n' "${err}" >&2
       fail "the Docker daemon did not become ready after $((attempts * delay))s at ${DOCKER_HOST}"
     fi
     if [ "${i}" -eq 1 ] || [ $((i % 5)) -eq 0 ]; then
