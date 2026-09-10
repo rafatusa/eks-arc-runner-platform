@@ -38,6 +38,14 @@ COMMIT_SHA="${GITHUB_SHA:?GITHUB_SHA required}"
 : "${TF_STATE_BUCKET:?TF_STATE_BUCKET required}"
 : "${PROJECT_NAME:?PROJECT_NAME required}"
 : "${AWS_REGION:?AWS_REGION required}"
+# The dispatched job runs `terraform init` against the state bucket. The runner
+# IRSA role deliberately has NO S3 access (docs/DEPLOYMENT.md), and its trust
+# policy only admits system:serviceaccount:actions-runner-system:github-runner
+# — the dispatched job runs in ${CI_NAMESPACE}, so AssumeRoleWithWebIdentity is
+# rejected there outright. Static keys are therefore the job's ONLY working
+# credential source, exactly as the hosted controller uses above.
+: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID required (the dispatched job's only credential for terraform init)}"
+: "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY required (the dispatched job's only credential for terraform init)}"
 
 log "Resolving cluster and runner image"
 terraform -chdir="${INFRA_DIR}" init -input=false -reconfigure \
@@ -56,8 +64,12 @@ log "Preparing the dispatch namespace"
 ##############################################################################
 kubectl create namespace "${CI_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-# The in-cluster job needs the same IRSA identity the ARC runners use, so the
-# service account is mirrored into this namespace.
+# The service account carries the runner role annotation for cluster RBAC and
+# for any ECR call that the role's own policy allows. It is NOT the credential
+# source for terraform: the role's trust policy is scoped to the
+# actions-runner-system namespace, so IRSA does not resolve here. The static
+# AWS_* keys in the secret below take precedence in the credential chain and
+# are what actually authenticates the dispatched stages.
 RUNNER_ROLE_ARN="$(tf_output runner_role_arn)"
 kubectl -n "${CI_NAMESPACE}" create serviceaccount github-runner \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -82,12 +94,16 @@ trap 'rm -rf "${CRED_DIR}"; rm -f "${RENDERED}"' EXIT
   printf '%s' "${PROJECT_NAME}"           > "${CRED_DIR}/project_name"
   printf '%s' "${TF_STATE_BUCKET}"        > "${CRED_DIR}/tf_state_bucket"
   printf '%s' "${DISPATCH_GITHUB_TOKEN}"  > "${CRED_DIR}/github_token"
+  printf '%s' "${AWS_ACCESS_KEY_ID}"      > "${CRED_DIR}/aws_access_key_id"
+  printf '%s' "${AWS_SECRET_ACCESS_KEY}"  > "${CRED_DIR}/aws_secret_access_key"
 )
 
 kubectl -n "${CI_NAMESPACE}" create secret generic ci-dispatch-secrets \
   --from-file="project_name=${CRED_DIR}/project_name" \
   --from-file="tf_state_bucket=${CRED_DIR}/tf_state_bucket" \
   --from-file="github_token=${CRED_DIR}/github_token" \
+  --from-file="aws_access_key_id=${CRED_DIR}/aws_access_key_id" \
+  --from-file="aws_secret_access_key=${CRED_DIR}/aws_secret_access_key" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 rm -rf "${CRED_DIR}"

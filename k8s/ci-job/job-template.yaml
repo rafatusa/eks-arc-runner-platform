@@ -91,6 +91,28 @@ spec:
                 secretKeyRef:
                   name: ci-dispatch-secrets
                   key: github_token
+            # STATIC AWS CREDENTIALS ARE REQUIRED — not a fallback for IRSA.
+            #
+            # Stages here run `terraform init` against the S3 state bucket. The
+            # ServiceAccount's runner role deliberately has NO S3 access
+            # (docs/DEPLOYMENT.md), AND its trust policy only admits
+            # system:serviceaccount:actions-runner-system:github-runner, while
+            # this Job runs in the ci-dispatch namespace — so
+            # AssumeRoleWithWebIdentity is rejected outright and IRSA yields no
+            # credentials whatsoever. Without these keys every stage that touches
+            # terraform or ECR dies in the preamble, seconds after start.
+            #
+            # Static keys take precedence over IRSA in the AWS credential chain.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ci-dispatch-secrets
+                  key: aws_access_key_id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ci-dispatch-secrets
+                  key: aws_secret_access_key
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
