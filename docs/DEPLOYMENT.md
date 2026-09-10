@@ -72,9 +72,26 @@ Dockerfile produces a new tag, so the rebuild actually happens and the pool
 rolls onto it. An unchanged toolchain yields the same tag and the ~1.5 GB build
 is skipped.
 
-> `scripts/ci/dispatch.sh` pins in-cluster CI jobs to **`runner-latest`**, which
-> is re-pushed alongside every content-hash tag. The two therefore stay in sync
-> as long as image changes go through a deploy.
+#### Tags are mutable; node caches are not invalidated by a re-push
+
+`scripts/ci/dispatch.sh` resolves `runner-latest` to an **immutable digest**
+(`aws ecr describe-images --image-ids imageTag=runner-latest`) and submits the
+Job with `repo@sha256:...`, never the tag.
+
+This is not a stylistic preference — it is a bug fix:
+
+- The `RunnerDeployment` uses `imagePullPolicy: Always`, so ARC runner pods
+  always fetch the current `runner-latest`.
+- Dispatched CI Jobs use `imagePullPolicy: IfNotPresent`, whose cache key is the
+  image **reference**. A node that pulled `runner-latest` once **never re-pulls
+  it**, so re-pushing the tag in ECR has no effect on that node.
+
+The two therefore drifted: ECR's `runner-latest` carried the current image
+(with terraform), while the node kept serving an older cached digest that
+predated the terraform install. Every dispatched stage running terraform failed
+with `required command not found: terraform` — on an image that demonstrably
+had it. Pinning to a digest makes the cache key content-addressed, so
+`IfNotPresent` is both correct and safe.
 
 ---
 
@@ -124,9 +141,9 @@ manual step.
    `dispatch.sh` itself needs — terraform and kubectl (`aws` and `python3` are
    preinstalled on the hosted image).
 2. `scripts/ci/dispatch.sh <stage-id> <script> <deadline>` reads the terraform
-   outputs, ensures the `ci-dispatch` namespace, service account (mirroring the
-   runner IRSA role) and RBAC binding exist, then submits a Kubernetes Job from
-   `k8s/ci-job/job-template.yaml`.
+   outputs, resolves the runner image to a digest, ensures the `ci-dispatch`
+   namespace, service account (mirroring the runner IRSA role) and RBAC binding
+   exist, then submits a Kubernetes Job from `k8s/ci-job/job-template.yaml`.
 3. The in-cluster pod runs the **same runner toolchain image** as the ARC
    runners, clones the exact commit, and executes the real stage script. A
    Docker-in-Docker sidecar backs the image-building stages.
@@ -199,6 +216,12 @@ Two things differ from a GitHub-hosted job, and the native workflows depend on b
   intentionally has **no S3 access**, so `terraform init` against the state
   bucket needs the `AWS_*` secrets, which take precedence over IRSA in the
   credential chain. Removing them breaks every stage at `terraform init`.
+
+  In **dispatch mode** the static keys are not merely preferred, they are the
+  *only* working credential: the runner role's trust policy admits only
+  `system:serviceaccount:actions-runner-system:github-runner`, and dispatched
+  Jobs run in `ci-dispatch`, so `AssumeRoleWithWebIdentity` is rejected outright
+  regardless of the ServiceAccount annotation.
 
 ### Job boundaries (both modes)
 
@@ -296,7 +319,26 @@ kubectl -n actions-runner-system get runners -o wide   # LABELS column
 
 ### A stage fails with "required command not found"
 
-The runner image lacks that tool. Add it to `runner-image/Dockerfile` and re-run
+**Check which image actually ran before rebuilding anything.** The tool may well
+be in the image already — this failure has been caused by a *stale node cache*
+rather than a missing tool:
+
+```bash
+# What the ARC runners run (imagePullPolicy: Always — always current)
+kubectl -n actions-runner-system get pod <runner-pod> -o jsonpath='{.spec.containers[*].image}'
+
+# What the node has cached
+kubectl get node <node> -o jsonpath='{.status.images[*].names}'
+
+# Prove the tool is or is not on the image
+kubectl exec -n actions-runner-system <runner-pod> -c runner -- which terraform
+```
+
+If the binary exists on the ARC runner but a dispatched Job says it does not,
+the Job booted a stale cached image. `dispatch.sh` now pins to a digest, which
+prevents exactly this; a tag reference would reintroduce it.
+
+If the tool is genuinely absent, add it to `runner-image/Dockerfile` and re-run
 the deploy — the content hash changes, so the image rebuilds and the pool rolls.
 Do **not** paper over it with a `setup-*` action in a native workflow: that
 reinstalls on every one of up to 20 pods.

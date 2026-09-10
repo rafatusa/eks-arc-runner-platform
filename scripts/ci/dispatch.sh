@@ -54,8 +54,40 @@ terraform -chdir="${INFRA_DIR}" init -input=false -reconfigure \
   -backend-config="region=${AWS_REGION}" >/dev/null
 
 ECR_URL="$(tf_output ecr_repository_url)"
-RUNNER_IMAGE="${ECR_URL}:runner-latest"
-info "runner image: ${RUNNER_IMAGE}"
+ECR_REPOSITORY="${ECR_URL##*/}"
+RUNNER_TAG="${RUNNER_TAG:-runner-latest}"
+
+# RESOLVE THE FLOATING TAG TO AN IMMUTABLE DIGEST.
+#
+# The Job template sets imagePullPolicy: IfNotPresent, so the kubelet's cache
+# key is the image REFERENCE. With a mutable tag like `runner-latest` a node
+# that pulled the tag once NEVER re-pulls it: repointing the tag in ECR has no
+# effect on any node that already has it cached, and the Job silently boots a
+# months-old toolchain. That is not hypothetical — it cost this project several
+# recovery attempts: `runner-latest` in ECR carried the current image while the
+# node still served an older digest that predated the terraform install, and
+# every dispatched stage that ran terraform died with
+# "required command not found: terraform" on an image that demonstrably had it.
+#
+# Pinning to @sha256:... makes the cache key content-addressed: a changed image
+# is a changed reference, so IfNotPresent is correct AND the pull is skipped
+# only when the bytes really are already there. Tags are mutable, digests are
+# not (OCI image-spec).
+log "Resolving the runner image digest"
+RUNNER_DIGEST="$(aws ecr describe-images \
+  --repository-name "${ECR_REPOSITORY}" \
+  --region "${AWS_REGION}" \
+  --image-ids "imageTag=${RUNNER_TAG}" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text 2>/dev/null || true)"
+
+if [ -z "${RUNNER_DIGEST}" ] || [ "${RUNNER_DIGEST}" = "None" ]; then
+  fail "could not resolve a digest for ${ECR_URL}:${RUNNER_TAG} — the runner image must be built and pushed before stages can be dispatched"
+fi
+
+RUNNER_IMAGE="${ECR_URL}@${RUNNER_DIGEST}"
+info "runner image: ${ECR_URL}:${RUNNER_TAG}"
+info "resolved digest: ${RUNNER_DIGEST}"
 
 ensure_kubeconfig
 

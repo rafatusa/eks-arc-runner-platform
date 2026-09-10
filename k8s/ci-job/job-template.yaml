@@ -24,6 +24,17 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: ci
+          # __RUNNER_IMAGE__ is a DIGEST reference (repo@sha256:...) that
+          # dispatch.sh resolves from the runner-latest tag at submit time.
+          #
+          # IfNotPresent is only safe BECAUSE the reference is content-addressed.
+          # With a mutable tag this combination silently pins every node to
+          # whatever digest it happened to cache first: the ARC RunnerDeployment
+          # uses imagePullPolicy: Always and so tracked the current image, while
+          # dispatched Jobs on the same node kept booting a months-old one whose
+          # toolchain predated the terraform install — "required command not
+          # found: terraform" from an image that demonstrably had terraform.
+          # Never replace this with a tag reference.
           image: __RUNNER_IMAGE__
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-lc"]
