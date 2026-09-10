@@ -2,6 +2,7 @@
 #
 # Build pipeline — Push Image to Amazon ECR stage.
 #
+# Runs NATIVELY on an ARC runner pod (runs-on: [self-hosted, eks]).
 # Each stage is a separate job on a NEW ephemeral runner pod, so the image built
 # in the previous stage is not on this pod's docker daemon. The image is rebuilt
 # here from the same commit (layer cache does not span pods) and pushed.
@@ -13,11 +14,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 require_cmd docker
 require_cmd aws
 require_cmd terraform
-# The projected SA/IRSA tokens live under /var/run/secrets and are the only
-# credential source here — check them before terraform and ECR need them.
+# Sanity check that the pod's projected identity survived its volume mounts.
+# NOTE: on a native ARC runner the AWS credentials come from the workflow's
+# env: block (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), NOT from this
+# ServiceAccount — the check is a cheap guard against a shadowed /var/run,
+# not the credential source.
 require_pod_credentials
-# This stage rebuilds the image, so it races the dind sidecar exactly like
-# docker_build does — wait for the daemon before any docker command.
+# ARC runs a Docker daemon for the runner pod and exports DOCKER_HOST; this
+# waits for it to actually serve rather than assuming it is up.
 wait_for_docker
 
 IMAGE_TAG="${GITHUB_SHA:-manual}"

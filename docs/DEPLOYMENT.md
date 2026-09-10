@@ -13,7 +13,7 @@ secret must be created by hand.
 | AWS account | With EKS/VPC/IAM/ECR permissions. Verified: account `241533126054`, region `us-east-1`. |
 | VPC headroom | This stack creates its **own** VPC. The default AWS limit is 5 per region — confirm you have one free (`aws ec2 describe-vpcs --query 'length(Vpcs)'`). |
 | Elastic IP headroom | One EIP is consumed by the NAT Gateway. |
-| GitHub PAT | A classic PAT with the **`repo`** scope. ARC uses it to register runners, and the dispatch shims use it to clone in-cluster. |
+| GitHub PAT | A classic PAT with the **`repo`** scope. ARC uses it to register runners. |
 | Local tooling (optional) | `kubectl`, `helm`, `awscli` — only for manual inspection. |
 
 ### Creating the runner PAT
@@ -33,7 +33,7 @@ platform at deploy time.
 ## Phase 1 — deploy the platform
 
 The deploy workflow runs on GitHub-hosted runners. That is deliberate: it is the
-workflow that *creates* the self-hosted runners.
+workflow that *creates* the self-hosted runners, so it cannot depend on them.
 
 ```
 lint → test → build → provision → configure → verify
@@ -72,26 +72,11 @@ Dockerfile produces a new tag, so the rebuild actually happens and the pool
 rolls onto it. An unchanged toolchain yields the same tag and the ~1.5 GB build
 is skipped.
 
-#### Tags are mutable; node caches are not invalidated by a re-push
-
-`scripts/ci/dispatch.sh` resolves `runner-latest` to an **immutable digest**
-(`aws ecr describe-images --image-ids imageTag=runner-latest`) and submits the
-Job with `repo@sha256:...`, never the tag.
-
-This is not a stylistic preference — it is a bug fix:
-
-- The `RunnerDeployment` uses `imagePullPolicy: Always`, so ARC runner pods
-  always fetch the current `runner-latest`.
-- Dispatched CI Jobs use `imagePullPolicy: IfNotPresent`, whose cache key is the
-  image **reference**. A node that pulled `runner-latest` once **never re-pulls
-  it**, so re-pushing the tag in ECR has no effect on that node.
-
-The two therefore drifted: ECR's `runner-latest` carried the current image
-(with terraform), while the node kept serving an older cached digest that
-predated the terraform install. Every dispatched stage running terraform failed
-with `required command not found: terraform` — on an image that demonstrably
-had it. Pinning to a digest makes the cache key content-addressed, so
-`IfNotPresent` is both correct and safe.
+The `RunnerDeployment` uses **`imagePullPolicy: Always`**, so runner pods always
+fetch the current `runner-latest` rather than a node's cached copy. This matters:
+a tag is mutable, but a node's image cache is **not** invalidated by a re-push.
+Any future component that consumes `runner-latest` with `IfNotPresent` must pin
+to a digest instead, or it will silently boot a stale toolchain.
 
 ---
 
@@ -129,63 +114,39 @@ A healthy idle state is **one** runner in phase `Running` (the configured minimu
 
 ---
 
-## CI execution mode (CURRENT: dispatch shims)
+## CI execution mode — native self-hosted runners
 
-`ci-build` and `ci-validate` are generated from the `pipelines:` block of
-`.udap/pipeline.yaml` and run as **dispatch shims**. They work today with no
-manual step.
+`ci-build` and `ci-validate` run **natively on the ARC runner pool**: every job
+carries `runs-on: [self-hosted, eks]`, so GitHub schedules it directly onto an
+ephemeral runner pod in EKS. There is no hosted controller in the middle.
 
-### How a shim stage executes
+### Workflow ownership — read this before editing
 
-1. A GitHub-hosted job (`ubuntu-latest`) starts and installs only what
-   `dispatch.sh` itself needs — terraform and kubectl (`aws` and `python3` are
-   preinstalled on the hosted image).
-2. `scripts/ci/dispatch.sh <stage-id> <script> <deadline>` reads the terraform
-   outputs, resolves the runner image to a digest, ensures the `ci-dispatch`
-   namespace, service account (mirroring the runner IRSA role) and RBAC binding
-   exist, then submits a Kubernetes Job from `k8s/ci-job/job-template.yaml`.
-3. The in-cluster pod runs the **same runner toolchain image** as the ARC
-   runners, clones the exact commit, and executes the real stage script. A
-   Docker-in-Docker sidecar backs the image-building stages.
-4. `dispatch.sh` streams the pod's logs back into the GitHub job and exits with
-   the **in-cluster exit code**, so a failure in the cluster fails the workflow.
+These two workflows are **NOT generated** from `.udap/pipeline.yaml`. They were
+deliberately removed from its `pipelines:` block, because the UDAP spec has no
+runner-placement key: the renderer always emits `runs-on: ubuntu-latest`, which
+can never target the pool.
 
-The real work (Gradle, Checkstyle/PMD/SpotBugs, JUnit/JaCoCo, Docker, Helm, k6)
-therefore runs **inside Kubernetes on the runner image**. The GitHub job is
-honestly a controller, not an ARC runner — it does not carry
-`runs-on: [self-hosted, eks]`.
+| Workflow | Source | Owner |
+|---|---|---|
+| `deploy.yml`, `destroy.yml` | rendered from `.udap/pipeline.yaml` | platform |
+| `ci-build.yml`, `ci-validate.yml` | `docs/self-hosted-workflows/` | **hand-committed** |
 
-### Why not native, by default
+> **Never re-add `ci-build` / `ci-validate` to `pipelines:`.** The next
+> `write_pipeline` would render an `ubuntu-latest` shim **over** the native
+> file, and CI would silently move off the cluster. The two mechanisms cannot
+> own the same filename.
 
-The UDAP pipeline spec has **no runner-placement key**: the renderer always
-emits `runs-on: ubuntu-latest`, and files under `.github/workflows/` cannot be
-authored through the platform. So a spec-generated workflow can never target the
-pool directly. Dispatch is the mode that works without human intervention.
+### Installing or updating the native workflows
 
----
-
-## Optional — switch to native self-hosted execution
-
-`docs/self-hosted-workflows/ci-build.yml` and `ci-validate.yml` are true
-`runs-on: [self-hosted, eks]` workflows: every job runs *as* an ephemeral runner
-pod, with no hosted controller in the middle.
-
-Switching requires a hand commit, because the platform refuses writes under
-`.github/workflows/`.
-
-> **Order matters.** Remove the pipelines from the spec *first*. If both exist,
-> the next `write_pipeline` re-renders an `ubuntu-latest` shim **over** your
-> native file — the two mechanisms cannot own the same filename.
+The platform refuses agent writes under `.github/workflows/`, so this is a
+human step:
 
 ```bash
 # 1. Confirm the pool is live and carries the toolchain
 kubectl -n actions-runner-system get runners      # >= 1 in phase Running
 
-# 2. Remove `ci-build` and `ci-validate` from the `pipelines:` block of
-#    .udap/pipeline.yaml, ship that change, and let the deploy re-render.
-#    .github/workflows/ must then contain only deploy.yml + destroy.yml.
-
-# 3. Put the native workflows in place
+# 2. Install (or refresh) the native workflows
 git pull
 cp docs/self-hosted-workflows/ci-build.yml    .github/workflows/ci-build.yml
 cp docs/self-hosted-workflows/ci-validate.yml .github/workflows/ci-validate.yml
@@ -201,9 +162,12 @@ Then trigger **CI Build (self-hosted)** from the Actions tab and watch jobs land
 kubectl -n actions-runner-system get pods -w
 ```
 
+`docs/self-hosted-workflows/` remains the **source of truth** — edit there and
+re-copy, so the two never drift.
+
 ### The native runner execution contract
 
-Two things differ from a GitHub-hosted job, and the native workflows depend on both:
+Three things differ from a GitHub-hosted job, and the workflows depend on all three:
 
 - **Toolchain comes from the image, not from `setup-*` actions.**
   `runner-image/Dockerfile` bakes in JDK 21, kubectl, helm, **terraform**, k6 and
@@ -211,38 +175,36 @@ Two things differ from a GitHub-hosted job, and the native workflows depend on b
   every stage — a runner image without terraform fails every stage that reads an
   infrastructure output. Re-installing toolchains per job would also repeat on
   all 20 concurrent pods.
+- **Docker comes from ARC.** The runner pod has a Docker daemon and ARC exports
+  `DOCKER_HOST=unix:///run/docker.sock`. `wait_for_docker()` in
+  `scripts/lib/common.sh` assigns its default only when `DOCKER_HOST` is
+  **unset** (`:=`), so ARC's real value wins — do not change that to a plain
+  assignment.
 - **Credentials: IRSA + static keys, deliberately both.** Runner pods assume
   `<project>-runner-role` (ECR push + `eks:DescribeCluster`). That role
   intentionally has **no S3 access**, so `terraform init` against the state
   bucket needs the `AWS_*` secrets, which take precedence over IRSA in the
   credential chain. Removing them breaks every stage at `terraform init`.
 
-  In **dispatch mode** the static keys are not merely preferred, they are the
-  *only* working credential: the runner role's trust policy admits only
-  `system:serviceaccount:actions-runner-system:github-runner`, and dispatched
-  Jobs run in `ci-dispatch`, so `AssumeRoleWithWebIdentity` is rejected outright
-  regardless of the ServiceAccount annotation.
+### Job boundaries
 
-### Job boundaries (both modes)
-
-Every job — hosted or native — is a **separate ephemeral environment**. Nothing
-survives between jobs: not the Docker daemon, not `reports/`, not a kubeconfig.
+Every job is a **separate ephemeral pod**. Nothing survives between jobs: not the
+Docker daemon, not `reports/`, not a kubeconfig.
 
 - `ecr_push` **rebuilds** the image rather than expecting `docker_build`'s layer
   cache; the header of `scripts/ci/ecr-push.sh` documents this.
 - Validation stages resolve the app URL from the cluster every time
   (`scripts/ci/lib/resolve-url.sh`) instead of threading it through job outputs,
   which GitHub drops when the value derives from a secret.
-- **Report collection differs.** In dispatch mode `generate-report.sh` publishes
-  the report into a ConfigMap and `fetch-report.sh` pulls it back to the hosted
-  job for artifact upload. In native mode there is no hosted job to pull it back,
-  so the generator re-runs the checks it needs on its own pod.
+- The HTML report generator re-runs the checks it needs on its own pod, since no
+  earlier job's `reports/` directory is reachable.
 
 ---
 
 ## Running the pipelines
 
-Both are `workflow_dispatch`.
+Both are `workflow_dispatch`; `ci-build` also runs on push to `main`, and
+`ci-validate` chains off a successful `ci-build`.
 
 ### `ci-build`
 
@@ -259,10 +221,6 @@ The final stage publishes `validation-report` as a workflow artifact — open
 Watch execution land in the cluster:
 
 ```bash
-# dispatch mode
-kubectl -n ci-dispatch get pods -w
-
-# native mode
 kubectl -n actions-runner-system get pods -w
 ```
 
@@ -297,25 +255,18 @@ kubectl -n actions-runner-system describe runners
 Almost always the PAT: expired, missing the `repo` scope, or created against the
 wrong account. Update `RUNNER_GITHUB_PAT` and re-run the deploy.
 
-### A dispatched stage never produces a pod
+### A self-hosted job stays queued forever
 
-```bash
-kubectl -n ci-dispatch get jobs
-kubectl -n ci-dispatch describe job <job-name>
-```
-
-Usually the node group is full (the Cluster Autoscaler needs 2–4 minutes) or the
-`ci-dispatch-secrets` secret is missing because `DISPATCH_GITHUB_TOKEN` was not
-set on the workflow.
-
-### A self-hosted job stays queued forever (native mode)
-
-No runner carries the requested labels. Check the pool exists and that the
-labels in `k8s/arc/runner-deployment.yaml` match the workflow's `runs-on`:
+This is the characteristic native-mode failure: an unmatched `runs-on` **queues**
+rather than failing, so the job simply sits there. No runner carries the
+requested labels. Check the pool exists and that the labels in
+`k8s/arc/runner-deployment.yaml` match the workflow's `runs-on`:
 
 ```bash
 kubectl -n actions-runner-system get runners -o wide   # LABELS column
 ```
+
+Expected: `self-hosted, linux, x64, eks`.
 
 ### A stage fails with "required command not found"
 
@@ -334,14 +285,19 @@ kubectl get node <node> -o jsonpath='{.status.images[*].names}'
 kubectl exec -n actions-runner-system <runner-pod> -c runner -- which terraform
 ```
 
-If the binary exists on the ARC runner but a dispatched Job says it does not,
-the Job booted a stale cached image. `dispatch.sh` now pins to a digest, which
-prevents exactly this; a tag reference would reintroduce it.
+"The binary is on the image" is **not** proof that the failing pod ran that
+image. Compare the digests before concluding anything.
 
 If the tool is genuinely absent, add it to `runner-image/Dockerfile` and re-run
 the deploy — the content hash changes, so the image rebuilds and the pool rolls.
-Do **not** paper over it with a `setup-*` action in a native workflow: that
-reinstalls on every one of up to 20 pods.
+Do **not** paper over it with a `setup-*` action: that reinstalls on every one of
+up to 20 pods.
+
+### A stage fails at `terraform init` with AccessDenied
+
+The `AWS_*` secrets are missing from the workflow `env:` block. IRSA alone cannot
+read the state bucket — the runner role has no S3 access by design. See
+"The native runner execution contract" above.
 
 ### Runner pods are `Pending`
 

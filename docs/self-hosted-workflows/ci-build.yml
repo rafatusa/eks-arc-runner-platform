@@ -1,29 +1,38 @@
-# NATIVE SELF-HOSTED BUILD PIPELINE — OPT-IN, NOT CURRENTLY ACTIVE
+# NATIVE SELF-HOSTED BUILD PIPELINE — READY TO INSTALL
 #
-# The repository currently runs CI through the DISPATCH SHIMS generated from the
-# `pipelines:` block of .udap/pipeline.yaml. This file is the native
-# alternative, in which every job runs AS an ephemeral ARC runner pod.
+# STATUS: `ci-build` has been REMOVED from `pipelines:` in .udap/pipeline.yaml,
+# so nothing re-renders over .github/workflows/ci-build.yml any more. The
+# dispatch shim and scripts/ci/dispatch.sh are deleted. This file is now the
+# ONLY definition of the build pipeline — until it is installed, the repository
+# has NO ci-build workflow.
 #
-# TO ACTIVATE — order matters:
-#   1. Remove `ci-build` from `pipelines:` in .udap/pipeline.yaml and let a
-#      deploy re-render, so .github/workflows/ holds only deploy.yml +
-#      destroy.yml. If you skip this, the next render overwrites the file you
-#      commit below with an ubuntu-latest shim.
-#   2. Copy this file to .github/workflows/ci-build.yml and commit it.
-# See docs/DEPLOYMENT.md → "Optional — switch to native self-hosted execution".
+# REMAINING STEP — must be done by a human:
+#   Copy this file to .github/workflows/ci-build.yml and commit it.
+#   The platform refuses agent writes anywhere under .github/workflows/, so this
+#   hand-commit cannot be delegated.
+#
+# See docs/DEPLOYMENT.md → "Native self-hosted execution".
 #
 # Why it cannot be generated: the pipeline spec has no runner-placement key —
 # the renderer always emits `runs-on: ubuntu-latest` — and files under
 # .github/workflows/ cannot be authored through the platform.
 #
-# BEFORE SWITCHING, CONFIRM:
+# BEFORE INSTALLING, CONFIRM:
 #   kubectl -n actions-runner-system get runners
 #   -> at least one runner in phase Running
+# Runner labels are ["self-hosted","linux","x64","eks"], which is what the
+# `runs-on: [self-hosted, eks]` below matches. If no runner is Running, jobs
+# QUEUE indefinitely rather than failing — check here first.
 #
 # TOOLCHAIN: the runner image (runner-image/Dockerfile) bakes in JDK 21, kubectl,
 # helm, terraform, k6 and the AWS CLI. There are deliberately NO setup-* actions
 # below: a self-hosted pod already has the toolchain, and re-installing it on
 # every one of up to 20 ephemeral pods would dominate the run time.
+#
+# DOCKER: ARC provides a Docker daemon for the runner pod and exports
+# DOCKER_HOST=unix:///run/docker.sock. No dind sidecar wiring is needed here —
+# scripts/ci/docker-build.sh and ecr-push.sh call wait_for_docker(), which
+# honours ARC's DOCKER_HOST.
 #
 # CREDENTIALS: runner pods carry an IRSA identity
 # (<project>-runner-role) scoped to ECR + eks:DescribeCluster. The stage scripts

@@ -61,24 +61,23 @@ retry() {
   return 0
 }
 
-# Blocks until the Docker-in-Docker sidecar is actually serving its API.
+# Blocks until the Docker daemon is actually serving its API.
 #
-# The `ci` and `dind` containers of a dispatched CI Job start in PARALLEL —
-# Kubernetes gives no ordering guarantee between them. dockerd needs a few
-# seconds to initialise storage and bind its unix socket, so a stage that runs
-# `docker build` immediately dies with:
+# CI stages run on ARC runner pods, where the Docker daemon comes from the
+# RunnerDeployment (dockerd-within-runner or a dind sidecar) and starts in
+# PARALLEL with the runner container — Kubernetes gives no ordering guarantee.
+# dockerd needs a few seconds to initialise storage and bind its unix socket, so
+# a stage that runs `docker build` immediately dies with:
 #
-#   Cannot connect to the Docker daemon at unix:///var/run/docker/docker.sock.
+#   Cannot connect to the Docker daemon at unix:///run/docker.sock.
 #
 # The socket's mere existence is not enough (dockerd binds before it is ready to
 # serve), so readiness is probed with `docker info`, which round-trips to the
 # daemon. Same failure class as the cert-manager webhook wait.
 #
-# The socket lives in the DEDICATED /var/run/docker directory, not bare
-# /var/run: the kubelet projects the pod's ServiceAccount and IRSA identity
-# files under /var/run/secrets, and a volume mounted at /var/run shadows them
-# unless the projected volumes are re-mounted on top at their more specific
-# paths. See k8s/ci-job/job-template.yaml.
+# DOCKER_HOST is assigned only when UNSET (`:=`), which is load-bearing: ARC
+# exports DOCKER_HOST=unix:///run/docker.sock on runner pods and that real value
+# must win. The fallback below is only a last resort for a pod that sets nothing.
 #
 # Call this in every stage that talks to docker, AFTER `require_cmd docker`.
 wait_for_docker() {
@@ -87,20 +86,20 @@ wait_for_docker() {
   local i=1
   local err
 
-  : "${DOCKER_HOST:=unix:///var/run/docker/docker.sock}"
+  : "${DOCKER_HOST:=unix:///run/docker.sock}"
   export DOCKER_HOST
 
   log "Waiting for the Docker daemon at ${DOCKER_HOST}"
   while ! docker info >/dev/null 2>&1; do
     # A PERMISSION error is not a readiness problem and will never clear by
     # waiting: it means dockerd created the socket without granting the
-    # runner's group access (dind needs --group=<runner gid>). Fail fast with
-    # the cause named rather than burning the full timeout on it.
+    # runner's group access. Fail fast with the cause named rather than
+    # burning the full timeout on it.
     err="$(docker info 2>&1 || true)"
     case "${err}" in
       *"permission denied"*|*"Permission denied"*)
         printf '\n--- docker error ---\n%s\n' "${err}" >&2
-        fail "cannot access ${DOCKER_HOST}: permission denied for $(id -un) (uid $(id -u), groups $(id -Gn)). The dind sidecar must run dockerd with --group=<runner gid> so the socket is group-accessible."
+        fail "cannot access ${DOCKER_HOST}: permission denied for $(id -un) (uid $(id -u), groups $(id -Gn)). dockerd must run with --group=<runner gid> so the socket is group-accessible."
         ;;
     esac
 
@@ -120,10 +119,13 @@ wait_for_docker() {
 }
 
 # Verifies the pod's kubelet-projected identity files survived the volume
-# mounts before a stage tries to use them. A volume mounted over /var/run
-# silently erases the projected identity directory, which surfaces much later as
-# an opaque AWS credential error — this turns it into a named failure at the
-# point of cause.
+# mounts before a stage tries to use them. A volume mounted over /var/run can
+# shadow the projected identity directory, which surfaces much later as an
+# opaque error — this turns it into a named failure at the point of cause.
+#
+# NOTE: on a native ARC runner the AWS credentials come from the workflow's
+# env: block, not from this ServiceAccount. The ca.crt check passes on any pod
+# and is a cheap mount-sanity guard, NOT a credential check.
 require_pod_credentials() {
   local sa_identity="/var/run/secrets/kubernetes.io/serviceaccount"
   [ -r "${sa_identity}/ca.crt" ] \

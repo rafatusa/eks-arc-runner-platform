@@ -1,39 +1,62 @@
-# Native self-hosted workflows (OPT-IN — not currently active)
+# Native self-hosted workflows — SOURCE OF TRUTH, install by hand
 
-These two files are true `runs-on: [self-hosted, eks]` workflows: every job runs
-*as* an ephemeral ARC runner pod, with no GitHub-hosted controller in between.
+These two files are the **only** definition of the build and validation
+pipelines. Every job carries `runs-on: [self-hosted, eks]`, so it runs *as* an
+ephemeral ARC runner pod in the EKS cluster, with no GitHub-hosted controller in
+between.
 
-**They are not active.** The repository currently runs CI through the **dispatch
-shims** generated from the `pipelines:` block of `.udap/pipeline.yaml`
-(`.github/workflows/ci-build.yml` and `ci-validate.yml`). Those shims work with
-no manual step: a hosted job submits a Kubernetes Job that runs the real stage
-in-cluster on the same runner image, and mirrors its exit code.
+## Status
 
-## Why activating these requires a hand commit
+`ci-build` and `ci-validate` have been **removed** from the `pipelines:` block of
+`.udap/pipeline.yaml`, and the old dispatch layer (`scripts/ci/dispatch.sh`,
+`scripts/ci/fetch-report.sh`, `k8s/ci-job/`) is deleted. `.github/workflows/`
+now contains only the platform-rendered `deploy.yml` and `destroy.yml`.
 
-The UDAP pipeline spec has no runner-placement key — the renderer always emits
-`runs-on: ubuntu-latest` — and files under `.github/workflows/` cannot be
-authored through the platform.
+**Until these files are copied into `.github/workflows/`, the repository has no
+CI build or validation workflow.**
 
-## Order matters
+## Install (or refresh) them
 
-Remove `ci-build` and `ci-validate` from the `pipelines:` block of
-`.udap/pipeline.yaml` **first**, and let a deploy re-render so
-`.github/workflows/` contains only `deploy.yml` and `destroy.yml`.
+```bash
+git pull
+cp ci-build.yml    ../../.github/workflows/ci-build.yml
+cp ci-validate.yml ../../.github/workflows/ci-validate.yml
 
-If both mechanisms exist, the next `write_pipeline` re-renders an
-`ubuntu-latest` shim **over** your native file. The two cannot own the same
-filename.
+cd ../..
+git add .github/workflows/ci-build.yml .github/workflows/ci-validate.yml
+git commit -m "ci: run build and validation natively on EKS self-hosted runners"
+git push
+```
 
-Full procedure, prerequisites and the runner execution contract:
-`docs/DEPLOYMENT.md` → "Optional — switch to native self-hosted execution".
+This must be a human commit: the platform refuses agent writes anywhere under
+`.github/workflows/`.
 
-## What changes behaviourally
+Keep editing **these** files and re-copying, so the two locations never drift.
 
-| | Dispatch shim (active) | Native (these files) |
-|---|---|---|
-| GitHub job runner | `ubuntu-latest` controller | the ARC runner pod itself |
-| Where stages run | in-cluster Job pod | the runner pod |
-| Toolchain source | runner image | runner image |
-| HTML report | generated in-cluster, pulled back via ConfigMap and uploaded as an artifact | regenerated on the reporting pod |
-| Manual setup | none | one hand commit |
+## Do not re-add them to the pipeline spec
+
+If `ci-build` / `ci-validate` reappear in `pipelines:`, the next
+`write_pipeline` renders an `ubuntu-latest` shim **over** the native file and CI
+silently moves off the cluster. The two mechanisms cannot own the same filename.
+
+## Before the first run
+
+```bash
+kubectl -n actions-runner-system get runners -o wide
+```
+
+At least one runner in phase `Running`, with labels
+`self-hosted, linux, x64, eks`. An unmatched `runs-on` makes jobs **queue
+indefinitely** rather than fail, so check this first if nothing starts.
+
+## What the runner pod provides
+
+| Concern | Source |
+|---|---|
+| Toolchain (JDK 21, kubectl, helm, terraform, k6, AWS CLI) | baked into `runner-image/Dockerfile` — no `setup-*` actions |
+| Docker | ARC's daemon; `DOCKER_HOST=unix:///run/docker.sock` is exported by ARC |
+| AWS credentials | `AWS_*` repo secrets in the workflow `env:` (IRSA alone cannot read the terraform state bucket) |
+| Artifacts between jobs | nothing survives — each job is a fresh pod |
+
+Full prerequisites, execution contract and troubleshooting:
+`docs/DEPLOYMENT.md` → "CI execution mode — native self-hosted runners".

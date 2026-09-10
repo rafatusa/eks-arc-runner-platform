@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 #
-# Validation pipeline — Generate HTML Report stage (runs INSIDE the cluster).
+# Validation pipeline — Generate HTML Report stage.
 #
-# Each stage runs in its own dispatched pod, so artifacts written by earlier
-# stages are NOT on this pod's filesystem. Rather than pretend otherwise, this
-# stage re-collects the live evidence itself (endpoint responses, cluster state,
-# runner inventory) and renders a self-contained HTML report.
+# Runs NATIVELY on an ARC runner pod (runs-on: [self-hosted, eks]).
 #
-# The pod is destroyed when the stage ends, so the finished report is published
-# into a ConfigMap that scripts/ci/fetch-report.sh reads from the GitHub job.
+# Each stage runs in its own ephemeral runner pod, so artifacts written by
+# earlier stages are NOT on this pod's filesystem. Rather than pretend
+# otherwise, this stage re-collects the live evidence itself (endpoint
+# responses, cluster state, runner inventory) and renders a self-contained HTML
+# report into reports/, which the workflow uploads with actions/upload-artifact.
+#
+# NOTE: this stage does NOT hand the report off through a ConfigMap. That was
+# only needed in the old dispatch mode, where a hosted job had to pull the file
+# back out of the cluster. Here the runner pod IS the GitHub job, so the
+# artifact upload reads reports/ directly.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
@@ -24,7 +29,6 @@ require_cmd python3
 APP_NAMESPACE="${APP_NAMESPACE:-runner-platform}"
 RELEASE_NAME="${RELEASE_NAME:-runner-platform-api}"
 ARC_NAMESPACE="actions-runner-system"
-CI_NAMESPACE="${CI_NAMESPACE:-ci-dispatch}"
 
 REPORT_DIR="${REPO_ROOT}/reports"
 mkdir -p "${REPORT_DIR}"
@@ -164,16 +168,5 @@ with open(os.path.join(report_dir, "index.html"), "w", encoding="utf-8") as fh:
 print(f"report written to {report_dir}/index.html")
 PY
 
-##############################################################################
-log "Publishing the report so the GitHub job can collect it"
-##############################################################################
-# This pod is destroyed when the stage ends, so the report is handed off through
-# a ConfigMap that scripts/ci/fetch-report.sh reads.
-CONFIGMAP_NAME="validation-report-${GITHUB_SHA:0:8}"
-
-kubectl -n "${CI_NAMESPACE}" create configmap "${CONFIGMAP_NAME}" \
-  --from-file="index.html=${REPORT_DIR}/index.html" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-log "HTML report generated and published as ${CONFIGMAP_NAME}"
+log "HTML report generated"
 ls -la "${REPORT_DIR}"

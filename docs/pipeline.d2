@@ -23,6 +23,8 @@ deploy: "Deploy workflow — GitHub-hosted" {
     Runs on `ubuntu-latest` **by design**:
     it creates the cluster and the runners,
     so it cannot depend on them.
+
+    Rendered from `.udap/pipeline.yaml`.
   |
 
   d1: lint (Checkstyle + PMD + SpotBugs)
@@ -48,13 +50,17 @@ bootstrap: "What configure installs" {
   b4 -> b5 -> b6
 }
 
-build: "Build pipeline — work executes in the cluster" {
+build: "Build pipeline — runs ON the EKS runner pods" {
   class: cluster
   explanation: |md
-    Each job is a **thin controller**: it submits a
-    Kubernetes Job that runs the stage on the runner
-    toolchain image, streams the logs back, and exits
-    with the in-cluster exit code.
+    Every job declares
+    `runs-on: [self-hosted, eks]`,
+    so GitHub schedules it directly onto an
+    **ephemeral ARC runner pod**. No hosted
+    controller in between.
+
+    Hand-committed from
+    `docs/self-hosted-workflows/`.
   |
 
   c1: Checkout
@@ -74,6 +80,12 @@ build: "Build pipeline — work executes in the cluster" {
 
 validate: "Validation pipeline — against the live deployment" {
   class: cluster
+  explanation: |md
+    Also `runs-on: [self-hosted, eks]`.
+    Each job is a fresh pod, so every stage
+    re-resolves the app URL from the cluster
+    instead of threading it through outputs.
+  |
 
   v1: Smoke Test
   v2: REST Assured Tests

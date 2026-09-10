@@ -1,26 +1,31 @@
-# NATIVE SELF-HOSTED VALIDATION PIPELINE — OPT-IN, NOT CURRENTLY ACTIVE
+# NATIVE SELF-HOSTED VALIDATION PIPELINE — READY TO INSTALL
 #
-# The repository currently runs CI through the DISPATCH SHIMS generated from the
-# `pipelines:` block of .udap/pipeline.yaml. This file is the native
-# alternative. See docs/self-hosted-workflows/ci-build.yml for the full
-# rationale, the runner toolchain contract, and why the AWS_* secrets are
-# required alongside IRSA.
+# STATUS: `ci-validate` has been REMOVED from `pipelines:` in
+# .udap/pipeline.yaml, so nothing re-renders over
+# .github/workflows/ci-validate.yml any more. This file is now the ONLY
+# definition of the validation pipeline — until it is installed, the repository
+# has NO ci-validate workflow.
 #
-# TO ACTIVATE — order matters:
-#   1. Remove `ci-validate` from `pipelines:` in .udap/pipeline.yaml and let a
-#      deploy re-render, so nothing re-renders over the file you commit.
-#   2. Copy this file to .github/workflows/ci-validate.yml and commit it.
-# See docs/DEPLOYMENT.md → "Optional — switch to native self-hosted execution".
+# REMAINING STEP — must be done by a human:
+#   Copy this file to .github/workflows/ci-validate.yml and commit it.
+#   The platform refuses agent writes anywhere under .github/workflows/.
 #
-# Unlike the dispatch version, these stages share nothing across jobs either —
-# each job is its own ephemeral pod — so every stage resolves the application
-# URL from the cluster itself (scripts/ci/lib/resolve-url.sh) rather than
-# receiving it through job outputs, which GitHub drops for secret-derived values.
+# See docs/self-hosted-workflows/ci-build.yml for the runner toolchain contract
+# and why the AWS_* secrets are required alongside IRSA, and
+# docs/DEPLOYMENT.md → "Native self-hosted execution".
 #
-# REPORTING DIFFERENCE: in dispatch mode the in-cluster stage publishes the
-# report into a ConfigMap and the hosted job pulls it back (scripts/ci/
-# fetch-report.sh). Here there is no hosted job to pull it back, so the
-# generator re-runs the checks it needs on its own pod.
+# TRIGGER NOTE: this runs on workflow_run of "CI Build (self-hosted)", so
+# ci-build.yml must be installed under that exact name or this never fires.
+#
+# Every job is its own ephemeral pod and they share nothing, so each stage
+# resolves the application URL from the cluster itself
+# (scripts/ci/lib/resolve-url.sh) rather than receiving it through job outputs,
+# which GitHub drops for secret-derived values.
+#
+# REPORTING: there is no hosted job to pull a report back from a ConfigMap, so
+# the generator re-runs the checks it needs on its own pod. (The old dispatch
+# helper scripts/ci/fetch-report.sh existed only for that hand-off and has been
+# deleted.)
 name: CI Validate (self-hosted)
 
 on:
