@@ -1,0 +1,228 @@
+# NATIVE SELF-HOSTED BUILD PIPELINE — READY TO INSTALL
+#
+# STATUS: `ci-build` has been REMOVED from `pipelines:` in .udap/pipeline.yaml,
+# so nothing re-renders over .github/workflows/ci-build.yml any more. The
+# dispatch shim and scripts/ci/dispatch.sh are deleted. This file is now the
+# ONLY definition of the build pipeline — until it is installed, the repository
+# has NO ci-build workflow.
+#
+# REMAINING STEP — must be done by a human:
+#   Copy this file to .github/workflows/ci-build.yml and commit it.
+#   The platform refuses agent writes anywhere under .github/workflows/, so this
+#   hand-commit cannot be delegated.
+#
+# See docs/DEPLOYMENT.md → "Native self-hosted execution".
+#
+# Why it cannot be generated: the pipeline spec has no runner-placement key —
+# the renderer always emits `runs-on: ubuntu-latest` — and files under
+# .github/workflows/ cannot be authored through the platform.
+#
+# BEFORE INSTALLING, CONFIRM:
+#   kubectl -n actions-runner-system get runners
+#   -> at least one runner in phase Running
+# Runner labels are ["self-hosted","linux","x64","eks"], which is what the
+# `runs-on: [self-hosted, eks]` below matches. If no runner is Running, jobs
+# QUEUE indefinitely rather than failing — check here first.
+#
+# TOOLCHAIN: the runner image (runner-image/Dockerfile) bakes in JDK 21, kubectl,
+# helm, terraform, k6 and the AWS CLI. There are deliberately NO setup-* actions
+# below: a self-hosted pod already has the toolchain, and re-installing it on
+# every one of up to 20 ephemeral pods would dominate the run time.
+#
+# DOCKER: ARC provides a Docker daemon for the runner pod and exports
+# DOCKER_HOST=unix:///run/docker.sock. No dind sidecar wiring is needed here —
+# scripts/ci/docker-build.sh and ecr-push.sh call wait_for_docker(), which
+# honours ARC's DOCKER_HOST.
+#
+# CREDENTIALS: runner pods carry an IRSA identity
+# (<project>-runner-role) scoped to ECR + eks:DescribeCluster. The stage scripts
+# ALSO read the terraform state bucket, which that role intentionally cannot
+# access, so the AWS_* secrets below are required and take precedence over IRSA.
+# Do not remove them expecting IRSA to cover the gap — terraform init would fail
+# with AccessDenied on the state bucket.
+name: CI Build (self-hosted)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'helm/**'
+      - 'scripts/**'
+      - '.github/workflows/ci-build.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+  PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
+
+jobs:
+  gradle_build:
+    name: Gradle Build
+    runs-on: [self-hosted, eks]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show the executing runner pod
+        run: |
+          echo "runner pod: ${HOSTNAME}"
+          java -version
+      - name: Compile
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean classes testClasses --no-daemon
+
+  checkstyle:
+    name: Checkstyle
+    runs-on: [self-hosted, eks]
+    needs: [gradle_build]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkstyle
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew checkstyleMain --no-daemon
+      - name: Upload Checkstyle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkstyle-report
+          path: app/build/reports/checkstyle/
+          if-no-files-found: ignore
+
+  pmd:
+    name: PMD
+    runs-on: [self-hosted, eks]
+    needs: [checkstyle]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: PMD
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew pmdMain --no-daemon
+      - name: Upload PMD report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmd-report
+          path: app/build/reports/pmd/
+          if-no-files-found: ignore
+
+  spotbugs:
+    name: SpotBugs
+    runs-on: [self-hosted, eks]
+    needs: [pmd]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: SpotBugs
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew spotbugsMain --no-daemon
+      - name: Upload SpotBugs report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotbugs-report
+          path: app/build/reports/spotbugs/
+          if-no-files-found: ignore
+
+  junit:
+    name: JUnit Tests
+    runs-on: [self-hosted, eks]
+    needs: [spotbugs]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew test --no-daemon
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: app/build/reports/tests/test/
+          if-no-files-found: ignore
+
+  jacoco:
+    name: JaCoCo Coverage
+    runs-on: [self-hosted, eks]
+    needs: [junit]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Coverage report and threshold gate
+        working-directory: app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: app/build/reports/jacoco/
+          if-no-files-found: ignore
+
+  docker_build:
+    name: Build Docker Image
+    runs-on: [self-hosted, eks]
+    needs: [jacoco]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: bash scripts/ci/docker-build.sh
+
+  ecr_push:
+    name: Push Image to Amazon ECR
+    runs-on: [self-hosted, eks]
+    needs: [docker_build]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # NOTE: this is a NEW pod with an empty docker daemon — the image built in
+      # docker_build does not survive the job boundary. ecr-push.sh rebuilds from
+      # the same commit before pushing; that is deliberate, not redundant work.
+      - name: Push image
+        run: bash scripts/ci/ecr-push.sh
+
+  helm_upgrade:
+    name: Helm Upgrade
+    runs-on: [self-hosted, eks]
+    needs: [ecr_push]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upgrade the release
+        run: bash scripts/ci/helm-upgrade.sh
+
+  verify_rollout:
+    name: Verify Rollout
+    runs-on: [self-hosted, eks]
+    needs: [helm_upgrade]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the rollout
+        run: bash scripts/ci/verify-rollout.sh

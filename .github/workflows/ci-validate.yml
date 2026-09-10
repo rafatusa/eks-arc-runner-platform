@@ -1,0 +1,135 @@
+# NATIVE SELF-HOSTED VALIDATION PIPELINE — READY TO INSTALL
+#
+# STATUS: `ci-validate` has been REMOVED from `pipelines:` in
+# .udap/pipeline.yaml, so nothing re-renders over
+# .github/workflows/ci-validate.yml any more. This file is now the ONLY
+# definition of the validation pipeline — until it is installed, the repository
+# has NO ci-validate workflow.
+#
+# REMAINING STEP — must be done by a human:
+#   Copy this file to .github/workflows/ci-validate.yml and commit it.
+#   The platform refuses agent writes anywhere under .github/workflows/.
+#
+# See docs/self-hosted-workflows/ci-build.yml for the runner toolchain contract
+# and why the AWS_* secrets are required alongside IRSA, and
+# docs/DEPLOYMENT.md → "Native self-hosted execution".
+#
+# TRIGGER NOTE: this runs on workflow_run of "CI Build (self-hosted)", so
+# ci-build.yml must be installed under that exact name or this never fires.
+#
+# Every job is its own ephemeral pod and they share nothing, so each stage
+# resolves the application URL from the cluster itself
+# (scripts/ci/lib/resolve-url.sh) rather than receiving it through job outputs,
+# which GitHub drops for secret-derived values.
+#
+# REPORTING: there is no hosted job to pull a report back from a ConfigMap, so
+# the generator re-runs the checks it needs on its own pod. (The old dispatch
+# helper scripts/ci/fetch-report.sh existed only for that hand-off and has been
+# deleted.)
+name: CI Validate (self-hosted)
+
+on:
+  workflow_run:
+    workflows: ["CI Build (self-hosted)"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-validate-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+  PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
+
+jobs:
+  smoke_test:
+    name: Smoke Test
+    # Never validate a deployment the build pipeline failed to ship.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, eks]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke test the public endpoints
+        run: bash scripts/ci/smoke-test.sh
+
+  rest_assured:
+    name: REST Assured Tests
+    runs-on: [self-hosted, eks]
+    needs: [smoke_test]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the REST Assured suite
+        run: bash scripts/ci/rest-assured.sh
+      - name: Upload REST Assured report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rest-assured-report
+          path: reports/rest-assured/
+          if-no-files-found: ignore
+
+  k6_load:
+    name: k6 Load Test
+    runs-on: [self-hosted, eks]
+    needs: [rest_assured]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the k6 load test
+        run: bash scripts/ci/k6-load.sh
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-results
+          path: reports/
+          if-no-files-found: ignore
+
+  deployment_verification:
+    name: Deployment Verification
+    runs-on: [self-hosted, eks]
+    needs: [k6_load]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the deployed platform
+        run: bash scripts/ci/deployment-verify.sh
+      - name: Upload verification output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-verification
+          path: reports/
+          if-no-files-found: ignore
+
+  html_report:
+    name: Generate HTML Report
+    runs-on: [self-hosted, eks]
+    needs: [deployment_verification]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Each stage above ran on its own pod, so reports/ is empty here. The
+      # generator re-runs the checks it needs and marks anything it could not
+      # collect, rather than silently emitting a partial report.
+      - name: Generate the HTML validation report
+        run: bash scripts/ci/generate-report.sh
+      - name: Upload the HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: reports/
+          if-no-files-found: error
